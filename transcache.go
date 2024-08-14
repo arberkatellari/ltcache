@@ -8,13 +8,18 @@ TransCache is a bigger version of Cache with support for multiple Cache instance
 package ltcache
 
 import (
+	"bytes"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"reflect"
 	"sync"
 	"time"
+
+	"golang.org/x/exp/mmap"
 )
 
 const (
@@ -85,6 +90,124 @@ type TransCache struct {
 	transactionMux    sync.Mutex                    // Queue transactions on commit
 }
 
+// Hold copy of original TransCache with necessary exportable fields
+type ExportedTransCache struct {
+	Cache map[string]*ExportedCache
+}
+
+// Method to populate ExportedTransCache struct with values of original TransCache
+func (tc *TransCache) toExportedTransCache() *ExportedTransCache {
+	etc := &ExportedTransCache{
+		Cache: make(map[string]*ExportedCache),
+	}
+
+	tc.cacheMux.RLock()
+	defer tc.cacheMux.RUnlock()
+
+	for key, cache := range tc.cache {
+		expCache := cache.toExportedCache()
+		etc.Cache[key] = &ExportedCache{
+			Cache:  expCache.Cache,
+			Groups: expCache.Groups,
+		}
+	}
+
+	return etc
+}
+
+// Method to populate TransCache with values of recovered ExportedTransCache
+func (etc *ExportedTransCache) toTransCache() *TransCache {
+
+	tc := &TransCache{
+		cache: make(map[string]*Cache),
+	}
+
+	for key, cache := range etc.Cache {
+		tc.cache[key] = &Cache{
+			cache: cache.toCache().cache,
+		}
+	}
+	return tc
+}
+
+// Will read all data from dump file and put them back on cache
+func (tc *TransCache) ReadAll(filename string) error {
+	r, err := mmap.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	p := make([]byte, r.Len())
+	_, err = r.ReadAt(p, 0)
+	if err != nil {
+		return err
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(p))
+	var expTransCache *ExportedTransCache
+	err = decoder.Decode(&expTransCache)
+	if err != nil {
+		return err
+	}
+
+	newTc := expTransCache.toTransCache()
+	// here would go populating the other fields of TransCache since if we recovered this transcache, we would be creating a new TransCache.cfg, TransCache.transactionBuffer, TransCache.cache.maxEntries, -||-.ttl ... which will be taken from the new engine config
+	// Could populate here or before we recover from dump
+
+	// Debug just for checking if fields populate properly
+	for cacheinstance, cache := range newTc.cache {
+		fmt.Println("cacheinstance", cacheinstance)
+		fmt.Println("cache.groups", cache.groups)
+		for chID, cachedItem := range cache.cache {
+			fmt.Println("chID", chID)
+			fmt.Println("cachedItem.itemID", cachedItem.itemID)
+			fmt.Println("cachedItem.value", cachedItem.value)
+			fmt.Println("cachedItem.expiryTime", cachedItem.expiryTime)
+			fmt.Println("cachedItem.groupIDs", cachedItem.groupIDs)
+		}
+	}
+	return nil
+}
+
+// WriteAll will write all of cache instances in a dump file
+func (tc *TransCache) WriteAll(filename string) error {
+
+	tc.cacheMux.RLock()
+	defer tc.cacheMux.RUnlock()
+
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+	defer file.Close()
+
+	// for cacheinstance, cache := range tc.cache {
+	// 	fmt.Println("cacheinstance", cacheinstance)
+	// 	fmt.Println("cache.groups", cache.groups)
+	// 	for chID, cachedItem := range cache.cache {
+	// 		fmt.Println("chID", chID)
+	// 		fmt.Println("cachedItem.itemID", cachedItem.itemID)
+	// 		fmt.Println("cachedItem.value", cachedItem.value)
+	// 		fmt.Println("cachedItem.expiryTime", cachedItem.expiryTime)
+	// 		fmt.Println("cachedItem.groupIDs", cachedItem.groupIDs)
+	// 	}
+	// }
+
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	err = encoder.Encode(tc.toExportedTransCache())
+	if err != nil {
+		fmt.Println("Error encoding data:", err)
+		return err
+	}
+	_, err = buf.WriteTo(file)
+	if err != nil {
+		fmt.Println("Error writing to file:", err)
+		return err
+	}
+	return nil
+}
+
 // cacheInstance returns a specific cache instance based on ID or default
 func (tc *TransCache) cacheInstance(chID string) (c *Cache) {
 	var ok bool
@@ -133,7 +256,7 @@ func (tc *TransCache) CommitTransaction(transID string) {
 	tc.transactionMux.Unlock()
 }
 
-//Get returns the value of an Item
+// Get returns the value of an Item
 func (tc *TransCache) Get(chID, itmID string) (interface{}, bool) {
 	tc.cacheMux.RLock()
 	defer tc.cacheMux.RUnlock()

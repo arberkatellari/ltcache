@@ -50,6 +50,72 @@ type Cache struct {
 	ttlRefs map[string]*list.Element // index the list element based on it' key in cache
 }
 
+// Hold copy of original CachedItem with necessary exportable fields
+type ExportedCachedItem struct {
+	ItemID     string
+	Value      interface{}
+	ExpiryTime time.Time
+	GroupIDs   []string // list of group this item belongs to
+}
+
+// Hold copy of original Cache with necessary exportable fields
+type ExportedCache struct {
+	Cache  map[string]*ExportedCachedItem
+	Groups map[string]map[string]struct{}
+}
+
+// Method to populate ExportedCachedItem with original values of cachedItem
+func (cI *cachedItem) toExportedCachedItem() *ExportedCachedItem {
+	return &ExportedCachedItem{
+		ItemID:     cI.itemID,
+		Value:      cI.value,
+		ExpiryTime: cI.expiryTime,
+		GroupIDs:   cI.groupIDs,
+	}
+}
+
+// Method to populate cachedItem with values of recovered ExportedCachedItem
+func (eci *ExportedCachedItem) toCachedItem() *cachedItem {
+	return &cachedItem{
+		itemID:     eci.ItemID,
+		value:      eci.Value,
+		expiryTime: eci.ExpiryTime,
+		groupIDs:   eci.GroupIDs,
+	}
+}
+
+// Method to populate ExportedCache with original values of Cache
+func (c *Cache) toExportedCache() *ExportedCache {
+	c.RLock()
+	defer c.RUnlock()
+	exportedCache := &ExportedCache{
+		Cache:  make(map[string]*ExportedCachedItem),
+		Groups: make(map[string]map[string]struct{}),
+	}
+	for key, item := range c.cache {
+		exportedCache.Cache[key] = item.toExportedCachedItem()
+	}
+	for groupID, items := range c.groups {
+		exportedCache.Groups[groupID] = items
+	}
+	return exportedCache
+}
+
+// Method to populate Cache with values of recovered ExportedCache
+func (ec *ExportedCache) toCache() *Cache {
+	cache := &Cache{
+		cache:  make(map[string]*cachedItem),
+		groups: make(map[string]map[string]struct{}),
+	}
+	for key, item := range ec.Cache {
+		cache.cache[key] = item.toCachedItem()
+	}
+	for groupID, items := range ec.Groups {
+		cache.groups[groupID] = items
+	}
+	return cache
+}
+
 // New initializes a new cache.
 func NewCache(maxEntries int, ttl time.Duration, staticTTL bool,
 	onEvicted func(itmID string, value interface{})) (c *Cache) {
