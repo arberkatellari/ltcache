@@ -51,7 +51,7 @@ type Cache struct {
 }
 
 // Hold copy of original CachedItem with necessary exportable fields
-type ExportedCachedItem struct {
+type DumpCachedItem struct {
 	ItemID     string
 	Value      interface{}
 	ExpiryTime time.Time
@@ -59,59 +59,75 @@ type ExportedCachedItem struct {
 }
 
 // Hold copy of original Cache with necessary exportable fields
-type ExportedCache struct {
-	Cache  map[string]*ExportedCachedItem
+type DumpCache struct {
+	Cache  map[string]*DumpCachedItem
 	Groups map[string]map[string]struct{}
 }
 
-// Method to populate ExportedCachedItem with original values of cachedItem
-func (cI *cachedItem) toExportedCachedItem() *ExportedCachedItem {
-	return &ExportedCachedItem{
+// Method to populate DumpCachedItem with original values of cachedItem
+func (cI *cachedItem) toDumpCachedItem() *DumpCachedItem {
+	dci := &DumpCachedItem{
 		ItemID:     cI.itemID,
 		Value:      cI.value,
 		ExpiryTime: cI.expiryTime,
 		GroupIDs:   cI.groupIDs,
 	}
+	return dci
 }
 
-// Method to populate cachedItem with values of recovered ExportedCachedItem
-func (eci *ExportedCachedItem) toCachedItem() *cachedItem {
+// Method to populate cachedItem with values of recovered DumpCachedItem
+func (dci *DumpCachedItem) toCachedItem() *cachedItem {
 	return &cachedItem{
-		itemID:     eci.ItemID,
-		value:      eci.Value,
-		expiryTime: eci.ExpiryTime,
-		groupIDs:   eci.GroupIDs,
+		itemID:     dci.ItemID,
+		value:      dci.Value,
+		expiryTime: dci.ExpiryTime,
+		groupIDs:   dci.GroupIDs,
 	}
 }
 
-// Method to populate ExportedCache with original values of Cache
-func (c *Cache) toExportedCache() *ExportedCache {
+// Method to populate DumpCache with original values of Cache
+func (c *Cache) toDumpCache() *DumpCache {
 	c.RLock()
 	defer c.RUnlock()
-	exportedCache := &ExportedCache{
-		Cache:  make(map[string]*ExportedCachedItem),
-		Groups: make(map[string]map[string]struct{}),
+	dumpCache := &DumpCache{
+		Cache:  make(map[string]*DumpCachedItem, len(c.cache)),
+		Groups: make(map[string]map[string]struct{}, len(c.groups)),
 	}
 	for key, item := range c.cache {
-		exportedCache.Cache[key] = item.toExportedCachedItem()
+		dumpCache.Cache[key] = item.toDumpCachedItem()
 	}
 	for groupID, items := range c.groups {
-		exportedCache.Groups[groupID] = items
+		dumpCache.Groups[groupID] = items
 	}
-	return exportedCache
+
+	return dumpCache
 }
 
-// Method to populate Cache with values of recovered ExportedCache
-func (ec *ExportedCache) toCache() *Cache {
+// Method to populate Cache with values of recovered DumpCache
+func newCacheFromDump(dc *DumpCache, maxEntries int, ttl time.Duration, staticTTL bool,
+	onEvicted func(itmID string, value interface{})) *Cache {
 	cache := &Cache{
-		cache:  make(map[string]*cachedItem),
-		groups: make(map[string]map[string]struct{}),
+		cache:      make(map[string]*cachedItem),
+		groups:     make(map[string]map[string]struct{}),
+		onEvicted:  onEvicted,
+		maxEntries: maxEntries,
+		ttl:        ttl,
+		staticTTL:  staticTTL,
+		lruIdx:     list.New(),
+		lruRefs:    make(map[string]*list.Element),
+		ttlIdx:     list.New(),
+		ttlRefs:    make(map[string]*list.Element),
 	}
-	for key, item := range ec.Cache {
-		cache.cache[key] = item.toCachedItem()
+
+	for chID, item := range dc.Cache {
+		cache.cache[chID] = item.toCachedItem()
+		cache.set(chID, cache.cache[chID])
 	}
-	for groupID, items := range ec.Groups {
+	for groupID, items := range dc.Groups {
 		cache.groups[groupID] = items
+	}
+	if cache.ttl > 0 {
+		go cache.cleanExpired()
 	}
 	return cache
 }
@@ -173,6 +189,28 @@ func (c *Cache) HasItem(itmID string) (has bool) {
 	_, has = c.cache[itmID]
 	c.RUnlock()
 	return
+}
+
+// set adds lru/ttl indexes and refs for each cachedItem. Used only for recovering from dump (not thread safe)
+func (c *Cache) set(chID string, cItem *cachedItem) {
+	if c.maxEntries == DisabledCaching {
+		return
+	}
+	if c.maxEntries != UnlimitedCaching {
+		c.lruRefs[chID] = c.lruIdx.PushFront(cItem)
+	}
+	if c.ttl > 0 {
+		c.ttlRefs[chID] = c.ttlIdx.PushFront(cItem)
+	}
+	if c.maxEntries != UnlimitedCaching {
+		var lElm *list.Element
+		if c.lruIdx.Len() > c.maxEntries {
+			lElm = c.lruIdx.Back()
+		}
+		if lElm != nil {
+			c.remove(lElm.Value.(*cachedItem).itemID)
+		}
+	}
 }
 
 // Set sets/adds a value to the cache.

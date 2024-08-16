@@ -10,16 +10,13 @@ package ltcache
 import (
 	"bytes"
 	"crypto/rand"
-	"encoding/json"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"reflect"
 	"sync"
 	"time"
-
-	"golang.org/x/exp/mmap"
 )
 
 const (
@@ -54,6 +51,14 @@ type transactionItem struct {
 	itemID   string      // item itentifier
 	value    interface{} // item value
 	groupIDs []string    // attach item to groups
+}
+
+type DumpTransactionItem struct {
+	Verb     string      // action which will be executed on cache
+	CacheID  string      // cache instance identifier
+	ItemID   string      // item itentifier
+	Value    interface{} // item value
+	GroupIDs []string    // attach item to groups
 }
 
 type CacheConfig struct {
@@ -91,99 +96,139 @@ type TransCache struct {
 }
 
 // Hold copy of original TransCache with necessary exportable fields
-type ExportedTransCache struct {
-	Cache map[string]*ExportedCache
+type DumpTransCache struct {
+	Cache             map[string]*DumpCache
+	TransactionBuffer map[string][]*DumpTransactionItem
 }
 
-// Method to populate ExportedTransCache struct with values of original TransCache
-func (tc *TransCache) toExportedTransCache() *ExportedTransCache {
-	etc := &ExportedTransCache{
-		Cache: make(map[string]*ExportedCache),
+func (tItem *transactionItem) toDumpTransactionItem() *DumpTransactionItem {
+	return &DumpTransactionItem{
+		Verb:     tItem.verb,
+		CacheID:  tItem.cacheID,
+		ItemID:   tItem.itemID,
+		Value:    tItem.value,
+		GroupIDs: tItem.groupIDs,
 	}
+}
 
+func newTransBufferFromDump(dmp *DumpTransactionItem) *transactionItem {
+	return &transactionItem{
+		verb:     dmp.Verb,
+		cacheID:  dmp.CacheID,
+		itemID:   dmp.ItemID,
+		value:    dmp.Value,
+		groupIDs: dmp.GroupIDs,
+	}
+}
+
+// Method to populate DumpTransCache struct with values of original TransCache
+func (tc *TransCache) toDumpTransCache() *DumpTransCache {
+	dmpTC := &DumpTransCache{
+		Cache:             make(map[string]*DumpCache, len(tc.cache)),
+		TransactionBuffer: make(map[string][]*DumpTransactionItem, len(tc.transactionBuffer)),
+	}
 	tc.cacheMux.RLock()
 	defer tc.cacheMux.RUnlock()
-
 	for key, cache := range tc.cache {
-		expCache := cache.toExportedCache()
-		etc.Cache[key] = &ExportedCache{
-			Cache:  expCache.Cache,
-			Groups: expCache.Groups,
+		dmpCache := cache.toDumpCache()
+		dmpTC.Cache[key] = &DumpCache{
+			Cache:  dmpCache.Cache,
+			Groups: dmpCache.Groups,
 		}
 	}
-
-	return etc
+	for transID, transItems := range tc.transactionBuffer {
+		var dmpTransBuff []*DumpTransactionItem
+		for _, transItem := range transItems {
+			dmpTransBuff = append(dmpTransBuff, transItem.toDumpTransactionItem())
+		}
+		dmpTC.TransactionBuffer[transID] = dmpTransBuff
+	}
+	return dmpTC
 }
 
-// Method to populate TransCache with values of recovered ExportedTransCache
-func (etc *ExportedTransCache) toTransCache() *TransCache {
-
+// Method to populate TransCache with values of recovered DumpTransCache
+func newTransCacheFromDump(dmpTC *DumpTransCache, cfg map[string]*CacheConfig) *TransCache {
+	if _, has := cfg[DefaultCacheInstance]; !has { // Default always created
+		cfg[DefaultCacheInstance] = &CacheConfig{MaxItems: -1}
+	}
 	tc := &TransCache{
-		cache: make(map[string]*Cache),
+		cache:             make(map[string]*Cache, len(dmpTC.Cache)),
+		cfg:               cfg,
+		transactionBuffer: make(map[string][]*transactionItem, len(dmpTC.TransactionBuffer)),
 	}
 
-	for key, cache := range etc.Cache {
-		tc.cache[key] = &Cache{
-			cache: cache.toCache().cache,
+	for key, dmpCache := range dmpTC.Cache {
+		tc.cache[key] = newCacheFromDump(dmpCache, cfg[key].MaxItems, cfg[key].TTL, cfg[key].StaticTTL, cfg[key].OnEvicted)
+	}
+	for dumpTransID, dumpTransItem := range dmpTC.TransactionBuffer {
+		var transBuff []*transactionItem
+		for _, transItem := range dumpTransItem {
+			transBuff = append(transBuff, newTransBufferFromDump(transItem))
 		}
+		tc.transactionBuffer[dumpTransID] = transBuff
 	}
 	return tc
 }
 
-// Will read all data from dump file and put them back on cache
-func (tc *TransCache) ReadAll(filename string) error {
-	r, err := mmap.Open(filename)
+// Will read all data from dump file and put them back on a new TransCache
+func ReadAll(decoder *gob.Decoder, cfg map[string]*CacheConfig) (tc *TransCache, err error) {
+
+	var dmpTC *DumpTransCache
+	err = decoder.Decode(&dmpTC)
 	if err != nil {
-		return err
-	}
-	defer r.Close()
-	p := make([]byte, r.Len())
-	_, err = r.ReadAt(p, 0)
-	if err != nil {
-		return err
+		return nil, err
 	}
 
-	decoder := json.NewDecoder(bytes.NewReader(p))
-	var expTransCache *ExportedTransCache
-	err = decoder.Decode(&expTransCache)
-	if err != nil {
-		return err
-	}
-
-	newTc := expTransCache.toTransCache()
-	// here would go populating the other fields of TransCache since if we recovered this transcache, we would be creating a new TransCache.cfg, TransCache.transactionBuffer, TransCache.cache.maxEntries, -||-.ttl ... which will be taken from the new engine config
-	// Could populate here or before we recover from dump
+	tc = newTransCacheFromDump(dmpTC, cfg)
 
 	// Debug just for checking if fields populate properly
-	for cacheinstance, cache := range newTc.cache {
-		fmt.Println("cacheinstance", cacheinstance)
-		fmt.Println("cache.groups", cache.groups)
-		for chID, cachedItem := range cache.cache {
-			fmt.Println("chID", chID)
-			fmt.Println("cachedItem.itemID", cachedItem.itemID)
-			fmt.Println("cachedItem.value", cachedItem.value)
-			fmt.Println("cachedItem.expiryTime", cachedItem.expiryTime)
-			fmt.Println("cachedItem.groupIDs", cachedItem.groupIDs)
-		}
-	}
-	return nil
-}
-
-// WriteAll will write all of cache instances in a dump file
-func (tc *TransCache) WriteAll(filename string) error {
-
-	tc.cacheMux.RLock()
-	defer tc.cacheMux.RUnlock()
-
-	file, err := os.Create(filename)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
-	}
-	defer file.Close()
-
+	// fmt.Println("newTc.transactionBuffer", tc.transactionBuffer)
 	// for cacheinstance, cache := range tc.cache {
 	// 	fmt.Println("cacheinstance", cacheinstance)
 	// 	fmt.Println("cache.groups", cache.groups)
+	// 	fmt.Println("cache.lruIdx", cache.lruIdx.Front())
+	// 	fmt.Println("cache.lruRefs", cache.lruRefs)
+	// 	fmt.Println("cache.ttlIdx", cache.ttlIdx.Front())
+	// 	fmt.Println("cache.ttlRefs", cache.ttlRefs)
+	// 	for chID, cachedItem := range cache.cache {
+	// 		fmt.Println("chID", chID)
+	// 		fmt.Println("cachedItem.itemID", cachedItem.itemID)
+	// 		fmt.Println("cachedItem.value", cachedItem.value)
+	// 		fmt.Println("cachedItem.expiryTime", cachedItem.expiryTime)
+	// 		fmt.Println("cachedItem.groupIDs", cachedItem.groupIDs)
+	// 	}
+	// }
+	return tc, nil
+}
+
+// WriteAll will write all of TransCache in a dump file
+func (tc *TransCache) WriteAll(w io.Writer, encoder *gob.Encoder, buf *bytes.Buffer) error {
+
+	// file, err := os.Create(filename)
+	// if err != nil {
+	// 	return fmt.Errorf("failed to create file: %w", err)
+	// }
+	// defer file.Close()
+	staratWrite := time.Now()
+	tc.cacheMux.RLock()
+	tc.transBufMux.Lock()
+	tc.transactionMux.Lock()
+	defer func() {
+		tc.cacheMux.RUnlock()
+		tc.transBufMux.Unlock()
+		tc.transactionMux.Unlock()
+		writeTime := time.Since(staratWrite)
+		fmt.Println("writeTime", writeTime)
+	}()
+
+	// fmt.Println("tc.transactionBuffer", tc.transactionBuffer)
+	// for cacheinstance, cache := range tc.cache {
+	// 	fmt.Println("cacheinstance", cacheinstance)
+	// 	fmt.Println("cache.groups", cache.groups)
+	// 	fmt.Println("cache.lruIdx", cache.lruIdx)
+	// 	fmt.Println("cache.lruRefs", cache.lruRefs)
+	// 	fmt.Println("cache.ttlIdx", cache.ttlIdx)
+	// 	fmt.Println("cache.ttlRefs", cache.ttlRefs)
 	// 	for chID, cachedItem := range cache.cache {
 	// 		fmt.Println("chID", chID)
 	// 		fmt.Println("cachedItem.itemID", cachedItem.itemID)
@@ -193,14 +238,14 @@ func (tc *TransCache) WriteAll(filename string) error {
 	// 	}
 	// }
 
-	var buf bytes.Buffer
-	encoder := json.NewEncoder(&buf)
-	err = encoder.Encode(tc.toExportedTransCache())
+	// var buf bytes.Buffer
+	// encoder := gob.NewEncoder(&buf)
+	err := encoder.Encode(*tc.toDumpTransCache())
 	if err != nil {
 		fmt.Println("Error encoding data:", err)
 		return err
 	}
-	_, err = buf.WriteTo(file)
+	_, err = buf.WriteTo(w)
 	if err != nil {
 		fmt.Println("Error writing to file:", err)
 		return err
