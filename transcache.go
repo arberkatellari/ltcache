@@ -8,15 +8,20 @@ TransCache is a bigger version of Cache with support for multiple Cache instance
 package ltcache
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/exp/mmap"
 )
 
 const (
@@ -24,11 +29,13 @@ const (
 	RemoveItem           = "RemoveItem"
 	RemoveGroup          = "RemoveGroup"
 	DefaultCacheInstance = "*default"
+	GroupsSffx           = "-groups"
 )
 
 var (
 	ErrNotFound    = errors.New("not found")
 	ErrNotClonable = errors.New("not clonable")
+	Delimiter      = []byte("\n---") // defines the characters that will be used to seperate cacheItems from each other when dumped to a file
 )
 
 func GenUUID() string {
@@ -101,6 +108,7 @@ type DumpTransCache struct {
 	TransactionBuffer map[string][]*DumpTransactionItem
 }
 
+// Method to populate DumpTransactionItem struct with values of original transactionItem
 func (tItem *transactionItem) toDumpTransactionItem() *DumpTransactionItem {
 	return &DumpTransactionItem{
 		Verb:     tItem.verb,
@@ -111,6 +119,7 @@ func (tItem *transactionItem) toDumpTransactionItem() *DumpTransactionItem {
 	}
 }
 
+// Populate transactionItem with values of recovered DumpTransactionItem
 func newTransBufferFromDump(dmp *DumpTransactionItem) *transactionItem {
 	return &transactionItem{
 		verb:     dmp.Verb,
@@ -136,6 +145,12 @@ func (tc *TransCache) toDumpTransCache() *DumpTransCache {
 			Groups: dmpCache.Groups,
 		}
 	}
+	tc.transBufMux.Lock()
+	tc.transactionMux.Lock()
+	defer func() {
+		tc.transBufMux.Unlock()
+		tc.transactionMux.Unlock()
+	}()
 	for transID, transItems := range tc.transactionBuffer {
 		var dmpTransBuff []*DumpTransactionItem
 		for _, transItem := range transItems {
@@ -146,7 +161,7 @@ func (tc *TransCache) toDumpTransCache() *DumpTransCache {
 	return dmpTC
 }
 
-// Method to populate TransCache with values of recovered DumpTransCache
+// Populate TransCache with values of recovered DumpTransCache
 func newTransCacheFromDump(dmpTC *DumpTransCache, cfg map[string]*CacheConfig) *TransCache {
 	if _, has := cfg[DefaultCacheInstance]; !has { // Default always created
 		cfg[DefaultCacheInstance] = &CacheConfig{MaxItems: -1}
@@ -171,16 +186,96 @@ func newTransCacheFromDump(dmpTC *DumpTransCache, cfg map[string]*CacheConfig) *
 }
 
 // Will read all data from dump file and put them back on a new TransCache
-func ReadAll(decoder *gob.Decoder, cfg map[string]*CacheConfig) (tc *TransCache, err error) {
-
-	var dmpTC *DumpTransCache
-	err = decoder.Decode(&dmpTC)
+func ReadAll(fldrPath string, cfg map[string]*CacheConfig) (tc *TransCache, err error) {
+	entries, err := os.ReadDir(fldrPath)
 	if err != nil {
-		return nil, err
+		return
 	}
+	var fileNames []string // Holds slice of all file names found in folder path
+	for _, entry := range entries {
+		fileNames = append(fileNames, entry.Name())
+	}
+	dmpTC := &DumpTransCache{
+		Cache:             make(map[string]*DumpCache),
+		TransactionBuffer: make(map[string][]*DumpTransactionItem),
+	}
+	for i := range fileNames {
+		r, err := mmap.Open(fldrPath + "/" + fileNames[i])
+		if err != nil {
+			return nil, err
+		}
+		p := make([]byte, r.Len()) // Holds the bytes of the file read
+		_, err = r.ReadAt(p, 0)
+		if err != nil {
+			return nil, err
+		}
 
-	tc = newTransCacheFromDump(dmpTC, cfg)
+		scanner := bufio.NewScanner(bytes.NewReader(p))  // Create new bufio scanner out of the file bytes
+		scanner.Buffer(make([]byte, 0, 1024), 1024*2024) // modify the scanner token limit to 1MiB, default 1KiB
+		scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+			dataLen := len(data)
+			if atEOF && dataLen == 0 {
+				return 0, nil, nil
+			}
+			// Find next Delimiter and return token
+			if i := bytes.Index(data, Delimiter); i >= 0 {
+				return i + len(Delimiter), data[0:i], nil
+			}
+			if atEOF { // Return the entire data when EOF
+				return dataLen, data, nil
+			}
+			return 0, nil, nil
+		})
 
+		if fileNames[i] != "TransactionBuffer" &&
+			!strings.HasSuffix(fileNames[i], GroupsSffx) {
+			dmpTC.Cache[fileNames[i]] = new(DumpCache)
+			dmpTC.Cache[fileNames[i]].Cache = map[string]*DumpCachedItem{}
+		}
+		for scanner.Scan() {
+			scannerBytes := scanner.Bytes() // Holds the bytes of 1 slice of the file
+			decoder := gob.NewDecoder(bytes.NewReader(scannerBytes))
+			if fileNames[i] == "TransactionBuffer" { // populate TransCaches's TransactionBuffer
+				var transBuf map[string][]*DumpTransactionItem
+				err = decoder.Decode(&transBuf)
+				if err != nil {
+					return nil, fmt.Errorf("error decoding TransactionBuffer: %w", err)
+				}
+				dmpTC.TransactionBuffer = transBuf
+				r.Close()
+				p = nil
+				break
+			} else if strings.Contains(fileNames[i], GroupsSffx) {
+				// populate Cache's Groups
+				var groups map[string]map[string]struct{}
+				if err := decoder.Decode(&groups); err != nil {
+					if err.Error() == "unexpected EOF" || err.Error() == "EOF" {
+						r.Close()
+						p = nil
+						break
+					}
+					return nil, fmt.Errorf("error decoding groups: %w", err)
+				}
+				dmpTC.Cache[strings.TrimSuffix(fileNames[i], GroupsSffx)].Groups = groups
+				r.Close()
+				p = nil
+				break
+			} // populate TransCaches's CachingInstances and their Cache
+			var chIdItmPair ChIDItemPair
+			if err := decoder.Decode(&chIdItmPair); err != nil {
+				if err.Error() != "unexpected EOF" && err.Error() != "EOF" /* && 	!strings.Contains(err.Error(), "got non-struct")*/ { // continue if EOF
+					return nil, fmt.Errorf("error decoding ChIDItemPair: %w", err)
+				}
+			} else { // populate Cache's CacheID and Items
+				dmpTC.Cache[fileNames[i]].Cache[chIdItmPair.ChID] = chIdItmPair.Item
+			}
+		}
+		r.Close()
+		p = nil
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("<%w> from file <%v>", err, fileNames[i])
+		}
+	}
 	// Debug just for checking if fields populate properly
 	// fmt.Println("newTc.transactionBuffer", tc.transactionBuffer)
 	// for cacheinstance, cache := range tc.cache {
@@ -198,25 +293,13 @@ func ReadAll(decoder *gob.Decoder, cfg map[string]*CacheConfig) (tc *TransCache,
 	// 		fmt.Println("cachedItem.groupIDs", cachedItem.groupIDs)
 	// 	}
 	// }
-	return tc, nil
+	return newTransCacheFromDump(dmpTC, cfg), err
 }
 
 // WriteAll will write all of TransCache in a dump file
-func (tc *TransCache) WriteAll(w io.Writer, encoder *gob.Encoder, buf *bytes.Buffer) error {
-
-	// file, err := os.Create(filename)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to create file: %w", err)
-	// }
-	// defer file.Close()
+func (tc *TransCache) WriteAll(fldrPath string) error {
 	staratWrite := time.Now()
-	tc.cacheMux.RLock()
-	tc.transBufMux.Lock()
-	tc.transactionMux.Lock()
 	defer func() {
-		tc.cacheMux.RUnlock()
-		tc.transBufMux.Unlock()
-		tc.transactionMux.Unlock()
 		writeTime := time.Since(staratWrite)
 		fmt.Println("writeTime", writeTime)
 	}()
@@ -238,19 +321,61 @@ func (tc *TransCache) WriteAll(w io.Writer, encoder *gob.Encoder, buf *bytes.Buf
 	// 	}
 	// }
 
-	// var buf bytes.Buffer
-	// encoder := gob.NewEncoder(&buf)
-	err := encoder.Encode(*tc.toDumpTransCache())
-	if err != nil {
-		fmt.Println("Error encoding data:", err)
-		return err
+	tcDmp := tc.toDumpTransCache() // Holds the TransCache converted to DumpTransCache to preserve types of unexportable fields
+	var wg sync.WaitGroup
+	errChan := make(chan error, 1) // used to stop and return the function if there are errors
+	var once sync.Once             // used with errChan to store only the first error
+	for chInstance, dumpCache := range tcDmp.Cache {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := writeDumpCacheToFile(fldrPath+"/"+chInstance, dumpCache); err != nil {
+				once.Do(func() {
+					errChan <- err
+				})
+				return
+			}
+		}()
 	}
-	_, err = buf.WriteTo(w)
-	if err != nil {
-		fmt.Println("Error writing to file:", err)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := writeDumpTransBufferToFile(fldrPath+"/TransactionBuffer",
+			tcDmp.TransactionBuffer); err != nil {
+			once.Do(func() {
+				errChan <- err
+			})
+		}
+	}()
+	wg.Wait()
+	select {
+	case err := <-errChan:
 		return err
+	default:
+		return nil
 	}
-	return nil
+}
+
+// Will encode dmpTransBuf and write it to a file
+func writeDumpTransBufferToFile(fileName string, dmpTransBuf map[string][]*DumpTransactionItem) (err error) {
+	var buf bytes.Buffer
+	encoder := gob.NewEncoder(&buf)
+	file, err := os.Create(fileName)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+	defer file.Close()
+	if err = encoder.Encode(dmpTransBuf); err != nil {
+		return fmt.Errorf("failed encoding data: %w", err)
+	}
+	fbuff := bufio.NewWriter(file)
+	if _, err = buf.WriteTo(fbuff); err != nil {
+		return fmt.Errorf("failed writing to file: %w", err)
+	}
+	if err = fbuff.Flush(); err != nil {
+		return fmt.Errorf("failed flushing buffer: %w", err)
+	}
+	return
 }
 
 // cacheInstance returns a specific cache instance based on ID or default

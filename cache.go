@@ -10,7 +10,12 @@ Original ideas from golang groupcache/lru.go
 package ltcache
 
 import (
+	"bufio"
+	"bytes"
 	"container/list"
+	"encoding/gob"
+	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -64,6 +69,64 @@ type DumpCache struct {
 	Groups map[string]map[string]struct{}
 }
 
+// Wrapper for CacheID-Item pairs, necessary when recovering from the dump file to
+// correlate which Item belongs to which ChacheID
+type ChIDItemPair struct {
+	ChID string
+	Item *DumpCachedItem
+}
+
+// Will encode and writeDumpCacheToFile each cache and group seperately
+func writeDumpCacheToFile(name string, dc *DumpCache) (err error) {
+	file, err := os.Create(name)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+	w := bufio.NewWriter(file)
+	for chID, chItem := range dc.Cache {
+		var buf bytes.Buffer
+		encoder := gob.NewEncoder(&buf)
+		if err = encoder.Encode(ChIDItemPair{ChID: chID, Item: chItem}); err != nil {
+			return fmt.Errorf("error encoding ChIDItemPair: %w", err)
+		}
+		if err = writeAndFlush(Delimiter, w, buf); err != nil {
+			return
+		}
+	}
+	file.Close()
+	if len(dc.Groups) != 0 {
+		file, err = os.Create(name + GroupsSffx)
+		if err != nil {
+			return fmt.Errorf("failed to create file: %w", err)
+		}
+		w = bufio.NewWriter(file)
+		var buf bytes.Buffer
+		encoder := gob.NewEncoder(&buf)
+		if err = encoder.Encode(dc.Groups); err != nil {
+			return fmt.Errorf("error encoding Cache Groups: %w", err)
+		}
+		if err = writeAndFlush(Delimiter, w, buf); err != nil {
+			return
+		}
+		file.Close()
+	}
+	return nil
+}
+
+// Will write the encoded struct followed by the delimiter to buffer and flush buffer after
+func writeAndFlush(delimiter []byte, fbuff *bufio.Writer, buf bytes.Buffer) (err error) {
+	if _, err = buf.WriteTo(fbuff); err != nil {
+		return fmt.Errorf("failed writing to file: %w", err)
+	}
+	if _, err = fbuff.Write(delimiter); err != nil {
+		return fmt.Errorf("failed writing delimiter: %w", err)
+	}
+	if err = fbuff.Flush(); err != nil {
+		return fmt.Errorf("failed flushing buffer: %w", err)
+	}
+	return nil
+}
+
 // Method to populate DumpCachedItem with original values of cachedItem
 func (cI *cachedItem) toDumpCachedItem() *DumpCachedItem {
 	dci := &DumpCachedItem{
@@ -103,7 +166,7 @@ func (c *Cache) toDumpCache() *DumpCache {
 	return dumpCache
 }
 
-// Method to populate Cache with values of recovered DumpCache
+// Populate Cache with values of recovered DumpCache
 func newCacheFromDump(dc *DumpCache, maxEntries int, ttl time.Duration, staticTTL bool,
 	onEvicted func(itmID string, value interface{})) *Cache {
 	cache := &Cache{
