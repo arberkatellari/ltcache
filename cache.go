@@ -167,33 +167,33 @@ func (c *Cache) toDumpCache() *DumpCache {
 }
 
 // Populate Cache with values of recovered DumpCache
-func newCacheFromDump(dc *DumpCache, maxEntries int, ttl time.Duration, staticTTL bool,
-	onEvicted func(itmID string, value interface{})) *Cache {
-	cache := &Cache{
-		cache:      make(map[string]*cachedItem),
-		groups:     make(map[string]map[string]struct{}),
-		onEvicted:  onEvicted,
-		maxEntries: maxEntries,
-		ttl:        ttl,
-		staticTTL:  staticTTL,
-		lruIdx:     list.New(),
-		lruRefs:    make(map[string]*list.Element),
-		ttlIdx:     list.New(),
-		ttlRefs:    make(map[string]*list.Element),
-	}
+// func newCacheFromDump(dc *DumpCache, maxEntries int, ttl time.Duration, staticTTL bool,
+// 	onEvicted func(itmID string, value interface{})) *Cache {
+// 	cache := &Cache{
+// 		cache:      make(map[string]*cachedItem),
+// 		groups:     make(map[string]map[string]struct{}),
+// 		onEvicted:  onEvicted,
+// 		maxEntries: maxEntries,
+// 		ttl:        ttl,
+// 		staticTTL:  staticTTL,
+// 		lruIdx:     list.New(),
+// 		lruRefs:    make(map[string]*list.Element),
+// 		ttlIdx:     list.New(),
+// 		ttlRefs:    make(map[string]*list.Element),
+// 	}
 
-	for chID, item := range dc.Cache {
-		cache.cache[chID] = item.toCachedItem()
-		cache.set(chID, cache.cache[chID])
-	}
-	for groupID, items := range dc.Groups {
-		cache.groups[groupID] = items
-	}
-	if cache.ttl > 0 {
-		go cache.cleanExpired()
-	}
-	return cache
-}
+// 	for chID, item := range dc.Cache {
+// 		cache.cache[chID] = item.toCachedItem()
+// 		cache.set(chID, cache.cache[chID])
+// 	}
+// 	for groupID, items := range dc.Groups {
+// 		cache.groups[groupID] = items
+// 	}
+// 	if cache.ttl > 0 {
+// 		go cache.cleanExpired()
+// 	}
+// 	return cache
+// }
 
 // New initializes a new cache.
 func NewCache(maxEntries int, ttl time.Duration, staticTTL bool,
@@ -235,6 +235,23 @@ func (c *Cache) Get(itmID string) (value interface{}, ok bool) {
 	return
 }
 
+// Get looks up a key's value from the cache, NOT THREAD SAFE
+func (c *Cache) GetUnsafe(itmID string) (value interface{}, ok bool) {
+	ci, has := c.cache[itmID]
+	if !has {
+		return
+	}
+	value, ok = ci.value, true
+	if c.maxEntries != UnlimitedCaching { // update lru indexes
+		c.lruIdx.MoveToFront(c.lruRefs[itmID])
+	}
+	if c.ttl > 0 && !c.staticTTL { // update ttl indexes
+		ci.expiryTime = time.Now().Add(c.ttl)
+		c.ttlIdx.MoveToFront(c.ttlRefs[itmID])
+	}
+	return
+}
+
 func (c *Cache) GetItemExpiryTime(itmID string) (exp time.Time, ok bool) {
 	c.RLock()
 	defer c.RUnlock()
@@ -251,6 +268,11 @@ func (c *Cache) HasItem(itmID string) (has bool) {
 	c.RLock()
 	_, has = c.cache[itmID]
 	c.RUnlock()
+	return
+}
+
+func (c *Cache) HasItemUnsafe(itmID string) (has bool) {
+	_, has = c.cache[itmID]
 	return
 }
 
@@ -319,6 +341,47 @@ func (c *Cache) Set(itmID string, value interface{}, grpIDs []string) {
 	}
 }
 
+// Set sets/adds a value to the cache, NOT THREAD SAFE
+func (c *Cache) SetUnsafe(itmID string, value interface{}, grpIDs []string) {
+	if c.maxEntries == DisabledCaching {
+		return
+	}
+	now := time.Now()
+	if ci, ok := c.cache[itmID]; ok {
+		ci.value = value
+		c.remItemFromGroups(itmID, ci.groupIDs)
+		ci.groupIDs = grpIDs
+		c.addItemToGroups(itmID, grpIDs)
+		if c.maxEntries != UnlimitedCaching { // update lru indexes
+			c.lruIdx.MoveToFront(c.lruRefs[itmID])
+		}
+		if c.ttl > 0 && !c.staticTTL { // update ttl indexes
+			ci.expiryTime = now.Add(c.ttl)
+			c.ttlIdx.MoveToFront(c.ttlRefs[itmID])
+		}
+		return
+	}
+	ci := &cachedItem{itemID: itmID, value: value, groupIDs: grpIDs}
+	c.cache[itmID] = ci
+	c.addItemToGroups(itmID, grpIDs)
+	if c.maxEntries != UnlimitedCaching {
+		c.lruRefs[itmID] = c.lruIdx.PushFront(ci)
+	}
+	if c.ttl > 0 {
+		ci.expiryTime = now.Add(c.ttl)
+		c.ttlRefs[itmID] = c.ttlIdx.PushFront(ci)
+	}
+	if c.maxEntries != UnlimitedCaching {
+		var lElm *list.Element
+		if c.lruIdx.Len() > c.maxEntries {
+			lElm = c.lruIdx.Back()
+		}
+		if lElm != nil {
+			c.remove(lElm.Value.(*cachedItem).itemID)
+		}
+	}
+}
+
 // Remove removes the provided key from the cache.
 func (c *Cache) Remove(itmID string) {
 	c.Lock()
@@ -335,6 +398,16 @@ func (c *Cache) GetItemIDs(prfx string) (itmIDs []string) {
 		}
 	}
 	c.RUnlock()
+	return
+}
+
+// GetItemIDs returns a list of items matching prefix, NOT THREAD SAFE
+func (c *Cache) GetItemIDsUnsafe(prfx string) (itmIDs []string) {
+	for itmID := range c.cache {
+		if strings.HasPrefix(itmID, prfx) {
+			itmIDs = append(itmIDs, itmID)
+		}
+	}
 	return
 }
 

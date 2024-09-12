@@ -10,6 +10,7 @@ package ltcache
 import (
 	"bufio"
 	"bytes"
+	"container/list"
 	"crypto/rand"
 	"encoding/gob"
 	"errors"
@@ -162,120 +163,213 @@ func (tc *TransCache) toDumpTransCache() *DumpTransCache {
 }
 
 // Populate TransCache with values of recovered DumpTransCache
-func newTransCacheFromDump(dmpTC *DumpTransCache, cfg map[string]*CacheConfig) *TransCache {
-	if _, has := cfg[DefaultCacheInstance]; !has { // Default always created
-		cfg[DefaultCacheInstance] = &CacheConfig{MaxItems: -1}
-	}
-	tc := &TransCache{
-		cache:             make(map[string]*Cache, len(dmpTC.Cache)),
-		cfg:               cfg,
-		transactionBuffer: make(map[string][]*transactionItem, len(dmpTC.TransactionBuffer)),
-	}
+// func newTransCacheFromDump(dmpTC *DumpTransCache, cfg map[string]*CacheConfig) *TransCache {
+// 	if _, has := cfg[DefaultCacheInstance]; !has { // Default always created
+// 		cfg[DefaultCacheInstance] = &CacheConfig{MaxItems: -1}
+// 	}
+// 	tc := &TransCache{
+// 		cache:             make(map[string]*Cache, len(dmpTC.Cache)),
+// 		cfg:               cfg,
+// 		transactionBuffer: make(map[string][]*transactionItem, len(dmpTC.TransactionBuffer)),
+// 	}
 
-	for key, dmpCache := range dmpTC.Cache {
-		tc.cache[key] = newCacheFromDump(dmpCache, cfg[key].MaxItems, cfg[key].TTL, cfg[key].StaticTTL, cfg[key].OnEvicted)
-	}
-	for dumpTransID, dumpTransItem := range dmpTC.TransactionBuffer {
-		var transBuff []*transactionItem
-		for _, transItem := range dumpTransItem {
-			transBuff = append(transBuff, newTransBufferFromDump(transItem))
-		}
-		tc.transactionBuffer[dumpTransID] = transBuff
-	}
-	return tc
-}
+// 	for key, dmpCache := range dmpTC.Cache {
+// 		tc.cache[key] = newCacheFromDump(dmpCache, cfg[key].MaxItems, cfg[key].TTL, cfg[key].StaticTTL, cfg[key].OnEvicted)
+// 	}
+// 	for dumpTransID, dumpTransItem := range dmpTC.TransactionBuffer {
+// 		var transBuff []*transactionItem
+// 		for _, transItem := range dumpTransItem {
+// 			transBuff = append(transBuff, newTransBufferFromDump(transItem))
+// 		}
+// 		tc.transactionBuffer[dumpTransID] = transBuff
+// 	}
+// 	return tc
+// }
 
 // Will read all data from dump file and put them back on a new TransCache
 func ReadAll(fldrPath string, cfg map[string]*CacheConfig) (tc *TransCache, err error) {
+	todmpTime1 := time.Now()
 	entries, err := os.ReadDir(fldrPath)
 	if err != nil {
 		return
 	}
+	fmt.Println("time to readDir: ", time.Since(todmpTime1))
 	var fileNames []string // Holds slice of all file names found in folder path
 	for _, entry := range entries {
 		fileNames = append(fileNames, entry.Name())
 	}
-	dmpTC := &DumpTransCache{
-		Cache:             make(map[string]*DumpCache),
-		TransactionBuffer: make(map[string][]*DumpTransactionItem),
+	if _, has := cfg[DefaultCacheInstance]; !has { // Default always created
+		cfg[DefaultCacheInstance] = &CacheConfig{MaxItems: -1}
 	}
+	tc = &TransCache{
+		cache:             make(map[string]*Cache),
+		cfg:               cfg,
+		transactionBuffer: make(map[string][]*transactionItem),
+	}
+	var wg sync.WaitGroup
+	errChan := make(chan error, 1) // used to stop and return the function if there are errors
+	var once sync.Once
 	for i := range fileNames {
-		r, err := mmap.Open(fldrPath + "/" + fileNames[i])
-		if err != nil {
-			return nil, err
-		}
-		p := make([]byte, r.Len()) // Holds the bytes of the file read
-		_, err = r.ReadAt(p, 0)
-		if err != nil {
-			return nil, err
-		}
-
-		scanner := bufio.NewScanner(bytes.NewReader(p))  // Create new bufio scanner out of the file bytes
-		scanner.Buffer(make([]byte, 0, 1024), 1024*2024) // modify the scanner token limit to 1MiB, default 1KiB
-		scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
-			dataLen := len(data)
-			if atEOF && dataLen == 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			todmpTime1 := time.Now()
+			r, err := mmap.Open(fldrPath + "/" + fileNames[i])
+			if err != nil {
+				once.Do(func() {
+					errChan <- err
+				})
+				// return nil, err
+			}
+			fmt.Println("time to open file: ", fileNames[i], time.Since(todmpTime1))
+			todmpTime1 = time.Now()
+			p := make([]byte, r.Len()) // Holds the bytes of the file read
+			_, err = r.ReadAt(p, 0)
+			if err != nil {
+				once.Do(func() {
+					errChan <- err
+				})
+				// return nil, err
+			}
+			fmt.Println("time to ReadAt: ", fileNames[i], time.Since(todmpTime1))
+			todmpTime1 = time.Now()
+			scanner := bufio.NewScanner(bytes.NewReader(p)) // Create new bufio scanner out of the file bytes
+			fmt.Println("time to NewScanner: ", fileNames[i], time.Since(todmpTime1))
+			scanner.Buffer(make([]byte, 0, 1024), 1024*2024) // modify the scanner token limit to 1MiB, default 1KiB. A token in this case would hold 1 cache 1tem
+			scanner.Split(func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+				dataLen := len(data)
+				if atEOF && dataLen == 0 {
+					return 0, nil, nil
+				}
+				// Find next Delimiter and return token
+				if i := bytes.Index(data, Delimiter); i >= 0 {
+					return i + len(Delimiter), data[0:i], nil
+				}
+				if atEOF { // Return the entire data when EOF
+					return dataLen, data, nil
+				}
 				return 0, nil, nil
-			}
-			// Find next Delimiter and return token
-			if i := bytes.Index(data, Delimiter); i >= 0 {
-				return i + len(Delimiter), data[0:i], nil
-			}
-			if atEOF { // Return the entire data when EOF
-				return dataLen, data, nil
-			}
-			return 0, nil, nil
-		})
+			})
 
-		if fileNames[i] != "TransactionBuffer" &&
-			!strings.HasSuffix(fileNames[i], GroupsSffx) {
-			dmpTC.Cache[fileNames[i]] = new(DumpCache)
-			dmpTC.Cache[fileNames[i]].Cache = map[string]*DumpCachedItem{}
-		}
-		for scanner.Scan() {
-			scannerBytes := scanner.Bytes() // Holds the bytes of 1 slice of the file
-			decoder := gob.NewDecoder(bytes.NewReader(scannerBytes))
-			if fileNames[i] == "TransactionBuffer" { // populate TransCaches's TransactionBuffer
-				var transBuf map[string][]*DumpTransactionItem
-				err = decoder.Decode(&transBuf)
-				if err != nil {
-					return nil, fmt.Errorf("error decoding TransactionBuffer: %w", err)
+			if fileNames[i] != "TransactionBuffer" &&
+				!strings.HasSuffix(fileNames[i], GroupsSffx) {
+				tc.cache[fileNames[i]] = &Cache{
+					cache:      make(map[string]*cachedItem),
+					groups:     make(map[string]map[string]struct{}),
+					onEvicted:  cfg[fileNames[i]].OnEvicted,
+					maxEntries: cfg[fileNames[i]].MaxItems,
+					ttl:        cfg[fileNames[i]].TTL,
+					staticTTL:  cfg[fileNames[i]].StaticTTL,
+					lruIdx:     list.New(),
+					lruRefs:    make(map[string]*list.Element),
+					ttlIdx:     list.New(),
+					ttlRefs:    make(map[string]*list.Element),
 				}
-				dmpTC.TransactionBuffer = transBuf
-				r.Close()
-				p = nil
-				break
-			} else if strings.Contains(fileNames[i], GroupsSffx) {
-				// populate Cache's Groups
-				var groups map[string]map[string]struct{}
-				if err := decoder.Decode(&groups); err != nil {
-					if err.Error() == "unexpected EOF" || err.Error() == "EOF" {
-						r.Close()
-						p = nil
-						break
-					}
-					return nil, fmt.Errorf("error decoding groups: %w", err)
+				if tc.cache[fileNames[i]].ttl > 0 {
+					go tc.cache[fileNames[i]].cleanExpired()
 				}
-				dmpTC.Cache[strings.TrimSuffix(fileNames[i], GroupsSffx)].Groups = groups
-				r.Close()
-				p = nil
-				break
-			} // populate TransCaches's CachingInstances and their Cache
-			var chIdItmPair ChIDItemPair
-			if err := decoder.Decode(&chIdItmPair); err != nil {
-				if err.Error() != "unexpected EOF" && err.Error() != "EOF" /* && 	!strings.Contains(err.Error(), "got non-struct")*/ { // continue if EOF
-					return nil, fmt.Errorf("error decoding ChIDItemPair: %w", err)
-				}
-			} else { // populate Cache's CacheID and Items
-				dmpTC.Cache[fileNames[i]].Cache[chIdItmPair.ChID] = chIdItmPair.Item
 			}
-		}
-		r.Close()
-		p = nil
-		if err := scanner.Err(); err != nil {
-			return nil, fmt.Errorf("<%w> from file <%v>", err, fileNames[i])
-		}
+			var ndcTime, dcTBTime, dcgTime, gcTime, dcciTime, pop1cTime, pop1ciTime time.Duration
+			var ndcCount, dcTBCount, dcgCount, gcCount, dcciCount, pop1cCount, pop1ciCount int
+			for scanner.Scan() {
+				todmpTime1 := time.Now()
+				decoder := gob.NewDecoder(bytes.NewReader(scanner.Bytes())) // scanner.Bytes() holds the bytes of 1 slice of the file
+				ndcTime += time.Since(todmpTime1)
+				ndcCount++
+				// fmt.Println("time to NewDecoder: ", fileNames[i], time.Since(todmpTime1))
+				if fileNames[i] == "TransactionBuffer" { // populate TransCaches's TransactionBuffer
+					var transBuf map[string][]*DumpTransactionItem
+					todmpTime1 := time.Now()
+					err = decoder.Decode(&transBuf)
+					dcTBTime += time.Since(todmpTime1)
+					dcTBCount++
+					// fmt.Println("time to Decode TransBuf: ", fileNames[i], time.Since(todmpTime1))
+					if err != nil {
+						once.Do(func() {
+							errChan <- fmt.Errorf("error decoding TransactionBuffer: %w", err)
+						})
+						// return nil, fmt.Errorf("error decoding TransactionBuffer: %w", err)
+					}
+					for dumpTransID, dumpTransItem := range transBuf {
+						var transBuff []*transactionItem
+						for _, transItem := range dumpTransItem {
+							transBuff = append(transBuff, newTransBufferFromDump(transItem))
+						}
+						tc.transactionBuffer[dumpTransID] = transBuff
+					}
+					r.Close()
+					break
+				} else if strings.Contains(fileNames[i], GroupsSffx) {
+					// populate Cache's Groups
+					var groups map[string]map[string]struct{}
+					todmpTime1 := time.Now()
+					if err := decoder.Decode(&groups); err != nil {
+						if err.Error() == "unexpected EOF" || err.Error() == "EOF" {
+							r.Close()
+							break
+						}
+						once.Do(func() {
+							errChan <- fmt.Errorf("error decoding groups: %w", err)
+						})
+						// return nil, fmt.Errorf("error decoding groups: %w", err)
+					}
+					dcgTime += time.Since(todmpTime1)
+					dcgCount++
+					// fmt.Println("Time to decode groups: ", fileNames[i], time.Since(todmpTime1))
+					todmpTime1 = time.Now()
+					if _, has := tc.cache[strings.TrimSuffix(fileNames[i], GroupsSffx)]; !has {
+						tc.cache[strings.TrimSuffix(fileNames[i], GroupsSffx)] = new(Cache)
+					}
+					tc.cache[strings.TrimSuffix(fileNames[i], GroupsSffx)].groups = groups
+					gcTime += time.Since(todmpTime1)
+					gcCount++
+					// fmt.Println("Time to populate groups in cache: ", fileNames[i], time.Since(todmpTime1))
+					r.Close()
+					break
+				} // populate TransCaches's CachingInstances and their Cache
+				var chIdItmPair ChIDItemPair
+				todmpTime1 = time.Now()
+				if err := decoder.Decode(&chIdItmPair); err != nil {
+					if err.Error() != "unexpected EOF" && err.Error() != "EOF" { // continue if EOF
+						once.Do(func() {
+							errChan <- fmt.Errorf("error decoding ChIDItemPair: %w", err)
+						})
+						// return nil, fmt.Errorf("error decoding ChIDItemPair: %w", err)
+					}
+				} else { // populate Cache's CacheID and Items
+					dcciTime += time.Since(todmpTime1)
+					dcciCount++
+					// fmt.Println("Time to decode 1 chitem pair: ", fileNames[i], time.Since(todmpTime1))
+					todmpTime1 := time.Now()
+					tc.cache[fileNames[i]].cache[chIdItmPair.ChID] = chIdItmPair.Item.toCachedItem()
+					pop1cTime += time.Since(todmpTime1)
+					pop1cCount++
+					// fmt.Println("Time to populate 1 cache item: ", fileNames[i], time.Since(todmpTime1))
+					todmpTime1 = time.Now()
+					tc.cache[fileNames[i]].set(chIdItmPair.ChID, tc.cache[fileNames[i]].cache[chIdItmPair.ChID])
+					pop1ciTime += time.Since(todmpTime1)
+					pop1ciCount++
+					// fmt.Println("time to set chache in cache instance: ", fileNames[i], time.Since(todmpTime1))
+				}
+			}
+			r.Close()
+			if err := scanner.Err(); err != nil {
+				once.Do(func() {
+					errChan <- fmt.Errorf("<%w> from file <%v>", err, fileNames[i])
+				})
+				// return nil, fmt.Errorf("<%w> from file <%v>", err, fileNames[i])
+			}
+			// (REMOVE LATER) ADD ITEMS COUNT AND AVG TIME FOR 1 DECODE TO COMPLETE
+			fmt.Println("aggregated ", ndcCount, ", time to NewDecoder: ", fileNames[i], ndcTime)
+			fmt.Println("aggregated ", dcTBCount, ",time to Decode TransBuf: ", fileNames[i], dcTBTime)
+			fmt.Println("aggregated ", dcgCount, ",Time to decode groups: ", fileNames[i], dcgTime)
+			fmt.Println("aggregated ", gcCount, ",Time to populate groups in cache: ", fileNames[i], gcTime)
+			fmt.Println("aggregated ", dcciCount, ",Time to decode 1 chitem pair: ", fileNames[i], dcciTime)
+			fmt.Println("aggregated ", pop1cCount, ",Time to populate 1 cache item: ", fileNames[i], pop1cTime)
+			fmt.Println("aggregated ", pop1ciCount, ",time to set chache in cache instance: ", fileNames[i], pop1ciTime)
+		}()
 	}
+	wg.Wait()
 	// Debug just for checking if fields populate properly
 	// fmt.Println("newTc.transactionBuffer", tc.transactionBuffer)
 	// for cacheinstance, cache := range tc.cache {
@@ -293,7 +387,13 @@ func ReadAll(fldrPath string, cfg map[string]*CacheConfig) (tc *TransCache, err 
 	// 		fmt.Println("cachedItem.groupIDs", cachedItem.groupIDs)
 	// 	}
 	// }
-	return newTransCacheFromDump(dmpTC, cfg), err
+	select {
+	case err := <-errChan:
+		return nil, err
+	default:
+		return
+	}
+	// return
 }
 
 // WriteAll will write all of TransCache in a dump file
@@ -321,31 +421,40 @@ func (tc *TransCache) WriteAll(fldrPath string) error {
 	// 	}
 	// }
 
+	todmpTime1 := time.Now()
 	tcDmp := tc.toDumpTransCache() // Holds the TransCache converted to DumpTransCache to preserve types of unexportable fields
+	fmt.Println("writeTime", time.Since(todmpTime1))
 	var wg sync.WaitGroup
 	errChan := make(chan error, 1) // used to stop and return the function if there are errors
-	var once sync.Once             // used with errChan to store only the first error
+	var once sync.Once             // used with errChan to  store only the first error
 	for chInstance, dumpCache := range tcDmp.Cache {
+		if chInstance == "*reverse_destinations" {
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			todmpTime1 := time.Now()
 			if err := writeDumpCacheToFile(fldrPath+"/"+chInstance, dumpCache); err != nil {
 				once.Do(func() {
 					errChan <- err
 				})
 				return
 			}
+			fmt.Println("1cachetofile: ", chInstance, time.Since(todmpTime1))
 		}()
 	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		todmpTime1 := time.Now()
 		if err := writeDumpTransBufferToFile(fldrPath+"/TransactionBuffer",
 			tcDmp.TransactionBuffer); err != nil {
 			once.Do(func() {
 				errChan <- err
 			})
 		}
+		fmt.Println("1transtofile", time.Since(todmpTime1))
 	}()
 	wg.Wait()
 	select {
@@ -433,6 +542,11 @@ func (tc *TransCache) Get(chID, itmID string) (interface{}, bool) {
 	return tc.cacheInstance(chID).Get(itmID)
 }
 
+// Get returns the value of an Itemm, NOT THREAD SAFE
+func (tc *TransCache) GetUnsafe(chID, itmID string) (interface{}, bool) {
+	return tc.cacheInstance(chID).GetUnsafe(itmID)
+}
+
 // Set will add/edit an item to the cache
 func (tc *TransCache) Set(chID, itmID string, value interface{},
 	groupIDs []string, commit bool, transID string) {
@@ -449,6 +563,19 @@ func (tc *TransCache) Set(chID, itmID string, value interface{},
 				verb: AddItem, itemID: itmID,
 				value: value, groupIDs: groupIDs})
 		tc.transBufMux.Unlock()
+	}
+}
+
+// Set will add/edit an item to the cache, NOT THREAD SAFE
+func (tc *TransCache) SetUnsafe(chID, itmID string, value interface{},
+	groupIDs []string, commit bool, transID string) {
+	if commit {
+		tc.cacheInstance(chID).SetUnsafe(itmID, value, groupIDs)
+	} else {
+		tc.transactionBuffer[transID] = append(tc.transactionBuffer[transID],
+			&transactionItem{cacheID: chID,
+				verb: AddItem, itemID: itmID,
+				value: value, groupIDs: groupIDs})
 	}
 }
 
@@ -555,6 +682,12 @@ func (tc *TransCache) GetItemIDs(chID, prfx string) (itmIDs []string) {
 	return
 }
 
+// GetItemIDs returns a list of item IDs matching prefix, NOT THREAD SAFE
+func (tc *TransCache) GetItemIDsUnsafe(chID, prfx string) (itmIDs []string) {
+	itmIDs = tc.cacheInstance(chID).GetItemIDsUnsafe(prfx)
+	return
+}
+
 // GetItemExpiryTime returns the expiry time of an item, ok is false if not found
 func (tc *TransCache) GetItemExpiryTime(chID, itmID string) (exp time.Time, ok bool) {
 	tc.cacheMux.RLock()
@@ -567,6 +700,12 @@ func (tc *TransCache) HasItem(chID, itmID string) (has bool) {
 	tc.cacheMux.RLock()
 	has = tc.cacheInstance(chID).HasItem(itmID)
 	tc.cacheMux.RUnlock()
+	return
+}
+
+// HasItem verifies if Item is in the cache, NOT THREAD SAFE
+func (tc *TransCache) HasItemUnsafe(chID, itmID string) (has bool) {
+	has = tc.cacheInstance(chID).HasItemUnsafe(itmID)
 	return
 }
 
