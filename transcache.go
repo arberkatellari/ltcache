@@ -208,8 +208,13 @@ func ReadAll(fldrPath string, cfg map[string]*CacheConfig) (tc *TransCache, err 
 	}
 	var wg sync.WaitGroup
 	errChan := make(chan error, 1) // used to stop and return the function if there are errors
+	done := make(chan struct{}, 1)
+	var mapMu sync.RWMutex
 	var once sync.Once
 	for i := range fileNames {
+		if strings.HasSuffix(fileNames[i], GroupsSffx) {
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -253,6 +258,7 @@ func ReadAll(fldrPath string, cfg map[string]*CacheConfig) (tc *TransCache, err 
 
 			if fileNames[i] != "TransactionBuffer" &&
 				!strings.HasSuffix(fileNames[i], GroupsSffx) {
+				mapMu.Lock()
 				tc.cache[fileNames[i]] = &Cache{
 					cache:      make(map[string]*cachedItem),
 					groups:     make(map[string]map[string]struct{}),
@@ -268,6 +274,7 @@ func ReadAll(fldrPath string, cfg map[string]*CacheConfig) (tc *TransCache, err 
 				if tc.cache[fileNames[i]].ttl > 0 {
 					go tc.cache[fileNames[i]].cleanExpired()
 				}
+				mapMu.Unlock()
 			}
 			var ndcTime, dcTBTime, dcgTime, gcTime, dcciTime, pop1cTime, pop1ciTime time.Duration
 			var ndcCount, dcTBCount, dcgCount, gcCount, dcciCount, pop1cCount, pop1ciCount int
@@ -299,7 +306,7 @@ func ReadAll(fldrPath string, cfg map[string]*CacheConfig) (tc *TransCache, err 
 					}
 					r.Close()
 					break
-				} else if strings.Contains(fileNames[i], GroupsSffx) {
+				} /*else if strings.Contains(fileNames[i], GroupsSffx) {
 					// populate Cache's Groups
 					var groups map[string]map[string]struct{}
 					todmpTime1 := time.Now()
@@ -326,7 +333,7 @@ func ReadAll(fldrPath string, cfg map[string]*CacheConfig) (tc *TransCache, err 
 					// fmt.Println("Time to populate groups in cache: ", fileNames[i], time.Since(todmpTime1))
 					r.Close()
 					break
-				} // populate TransCaches's CachingInstances and their Cache
+				}*/ // populate TransCaches's CachingInstances and their Cache
 				var chIdItmPair ChIDItemPair
 				todmpTime1 = time.Now()
 				if err := decoder.Decode(&chIdItmPair); err != nil {
@@ -341,12 +348,16 @@ func ReadAll(fldrPath string, cfg map[string]*CacheConfig) (tc *TransCache, err 
 					dcciCount++
 					// fmt.Println("Time to decode 1 chitem pair: ", fileNames[i], time.Since(todmpTime1))
 					todmpTime1 := time.Now()
+					mapMu.RLock()
 					tc.cache[fileNames[i]].cache[chIdItmPair.ChID] = chIdItmPair.Item.toCachedItem()
+					mapMu.RUnlock()
 					pop1cTime += time.Since(todmpTime1)
 					pop1cCount++
 					// fmt.Println("Time to populate 1 cache item: ", fileNames[i], time.Since(todmpTime1))
 					todmpTime1 = time.Now()
+					mapMu.RLock()
 					tc.cache[fileNames[i]].set(chIdItmPair.ChID, tc.cache[fileNames[i]].cache[chIdItmPair.ChID])
+					mapMu.RUnlock()
 					pop1ciTime += time.Since(todmpTime1)
 					pop1ciCount++
 					// fmt.Println("time to set chache in cache instance: ", fileNames[i], time.Since(todmpTime1))
@@ -369,7 +380,80 @@ func ReadAll(fldrPath string, cfg map[string]*CacheConfig) (tc *TransCache, err 
 			fmt.Println("aggregated ", pop1ciCount, ",time to set chache in cache instance: ", fileNames[i], pop1ciTime)
 		}()
 	}
-	wg.Wait()
+	go func() {
+		wg.Wait()
+		for i := range fileNames {
+			if !strings.Contains(fileNames[i], GroupsSffx) {
+				continue
+			}
+			todmpTime1 := time.Now()
+			r, err := mmap.Open(fldrPath + "/" + fileNames[i])
+			if err != nil {
+				once.Do(func() {
+					errChan <- err
+				})
+				// return nil, err
+			}
+			fmt.Println("time to open file: ", fileNames[i], time.Since(todmpTime1))
+			todmpTime1 = time.Now()
+			p := make([]byte, r.Len()) // Holds the bytes of the file read
+			_, err = r.ReadAt(p, 0)
+			if err != nil {
+				once.Do(func() {
+					errChan <- err
+				})
+				// return nil, err
+			}
+			fmt.Println("time to ReadAt: ", fileNames[i], time.Since(todmpTime1))
+			todmpTime1 = time.Now()
+			scanner := bufio.NewScanner(bytes.NewReader(p)) // Create new bufio scanner out of the file bytes
+			fmt.Println("time to NewScanner: ", fileNames[i], time.Since(todmpTime1))
+			scanner.Buffer(make([]byte, 0, 1024), 1024*2024) // modify the scanner token limit to 1MiB, default 1KiB. A token in this case would hold 1 cache 1tem
+			var ndcTime, dcgTime, gcTime time.Duration
+			var ndcCount, dcgCount, gcCount int
+			for scanner.Scan() {
+				todmpTime1 := time.Now()
+				decoder := gob.NewDecoder(bytes.NewReader(scanner.Bytes())) // scanner.Bytes() holds the bytes of 1 slice of the file
+				ndcTime += time.Since(todmpTime1)
+				ndcCount++
+				// populate Cache's Groups
+				var groups map[string]map[string]struct{}
+				todmpTime1 = time.Now()
+				if err := decoder.Decode(&groups); err != nil {
+					if err.Error() == "unexpected EOF" || err.Error() == "EOF" {
+						r.Close()
+						break
+					}
+					once.Do(func() {
+						errChan <- fmt.Errorf("error decoding groups: %w", err)
+					})
+					// return nil, fmt.Errorf("error decoding groups: %w", err)
+				}
+				dcgTime += time.Since(todmpTime1)
+				dcgCount++
+				// fmt.Println("Time to decode groups: ", fileNames[i], time.Since(todmpTime1))
+				todmpTime1 = time.Now()
+				tc.cache[strings.TrimSuffix(fileNames[i], GroupsSffx)].groups = groups
+				gcTime += time.Since(todmpTime1)
+				gcCount++
+				// fmt.Println("Time to populate groups in cache: ", fileNames[i], time.Since(todmpTime1))
+				r.Close()
+				break
+			}
+			r.Close()
+			if err := scanner.Err(); err != nil {
+				once.Do(func() {
+					errChan <- fmt.Errorf("<%w> from file <%v>", err, fileNames[i])
+				})
+				// return nil, fmt.Errorf("<%w> from file <%v>", err, fileNames[i])
+			}
+			// (REMOVE LATER) ADD ITEMS COUNT AND AVG TIME FOR 1 DECODE TO COMPLETE
+			fmt.Println("aggregated ", ndcCount, ", time to NewDecoder: ", fileNames[i], ndcTime)
+			fmt.Println("aggregated ", dcgCount, ",Time to decode groups: ", fileNames[i], dcgTime)
+			fmt.Println("aggregated ", gcCount, ",Time to populate groups in cache: ", fileNames[i], gcTime)
+		}
+		done <- struct{}{}
+	}()
 	// Debug just for checking if fields populate properly
 	// fmt.Println("newTc.transactionBuffer", tc.transactionBuffer)
 	// for cacheinstance, cache := range tc.cache {
@@ -390,7 +474,7 @@ func ReadAll(fldrPath string, cfg map[string]*CacheConfig) (tc *TransCache, err 
 	select {
 	case err := <-errChan:
 		return nil, err
-	default:
+	case <-done:
 		return
 	}
 	// return
