@@ -34,6 +34,7 @@ type Cache struct {
 	// cache holds the items
 	cache  map[string]*cachedItem
 	groups map[string]map[string]struct{} // map[groupID]map[itemKey]struct{}
+
 	// onEvicted will execute specific function if defined when an item will be removed
 	onEvicted func(itmID string, value interface{})
 	// maxEntries represents maximum number of entries allowed by LRU cache mechanism
@@ -67,6 +68,7 @@ func NewCache(maxEntries int, ttl time.Duration, staticTTL bool,
 	}
 	if c.ttl > 0 {
 		go c.cleanExpired()
+
 	}
 	return
 }

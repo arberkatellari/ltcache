@@ -58,6 +58,11 @@ type CacheConfig struct {
 	OnEvicted func(itmID string, value interface{})
 }
 
+// Creates an object to temporarily hold cache until they are dumped to file
+func NewMemCacheCollector() *InstanceCollector {
+	return new(InstanceCollector)
+}
+
 // NewTransCache instantiates a new TransCache
 func NewTransCache(cfg map[string]*CacheConfig) (tc *TransCache) {
 	if _, has := cfg[DefaultCacheInstance]; !has { // Default always created
@@ -83,6 +88,8 @@ type TransCache struct {
 	transactionBuffer map[string][]*transactionItem // Queue tasks based on transactionID
 	transBufMux       sync.Mutex                    // Protects the transactionBuffer
 	transactionMux    sync.Mutex                    // Queue transactions on commit
+
+	Collector *InstanceCollector // temporarily hold caching instances, until dumped to file
 }
 
 // cacheInstance returns a specific cache instance based on ID or default
@@ -133,7 +140,7 @@ func (tc *TransCache) CommitTransaction(transID string) {
 	tc.transactionMux.Unlock()
 }
 
-//Get returns the value of an Item
+// Get returns the value of an Item
 func (tc *TransCache) Get(chID, itmID string) (interface{}, bool) {
 	tc.cacheMux.RLock()
 	defer tc.cacheMux.RUnlock()
@@ -148,7 +155,17 @@ func (tc *TransCache) Set(chID, itmID string, value interface{},
 			tc.cacheMux.Lock()
 			defer tc.cacheMux.Unlock()
 		}
-		tc.cacheInstance(chID).Set(itmID, value, groupIDs)
+		c := tc.cacheInstance(chID)
+		c.Set(itmID, value, groupIDs)
+		if tc.Collector != nil && tc.Collector.isActive {
+			if tc.Collector.writeOnArrival {
+
+			} else {
+				c.RLock()
+				tc.Collector.collect(chID, itmID, value, c.cache[itmID].expiryTime, groupIDs)
+				c.RUnlock()
+			}
+		}
 	} else {
 		tc.transBufMux.Lock()
 		tc.transactionBuffer[transID] = append(tc.transactionBuffer[transID],
@@ -227,6 +244,13 @@ func (tc *TransCache) Clear(chIDs []string) {
 	}
 	for _, chID := range chIDs {
 		tc.cacheInstance(chID).Clear()
+		if tc.Collector != nil && tc.Collector.isActive {
+			if tc.Collector.writeOnArrival {
+
+			} else {
+				tc.Collector.clearCacheInstance(chID)
+			}
+		}
 	}
 	tc.cacheMux.Unlock()
 }
