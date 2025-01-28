@@ -159,7 +159,7 @@ func (tc *TransCache) Set(chID, itmID string, value interface{},
 		c.Set(itmID, value, groupIDs)
 		if tc.offCollector != nil {
 			c.RLock()
-			if err := tc.offCollector.storeCache(chID, itmID, value, c.cache[itmID].expiryTime, groupIDs); err != nil {
+			if err := tc.storeCache(chID, itmID); err != nil {
 				tc.offCollector.logger.Err(err.Error())
 			}
 			c.RUnlock()
@@ -172,6 +172,23 @@ func (tc *TransCache) Set(chID, itmID string, value interface{},
 				value: value, groupIDs: groupIDs})
 		tc.transBufMux.Unlock()
 	}
+}
+
+// Decides weather to write the cache on file instantly or put it in the collector to store in intervals
+func (tc *TransCache) storeCache(chInstance, cacheID string) (err error) {
+	if tc.offCollector.dumpInterval == 0 {
+		return
+	}
+	if tc.offCollector.dumpInterval == -1 {
+		tc.offCollector.setCollMux[chInstance].Lock()
+		defer tc.offCollector.setCollMux[chInstance].Unlock()
+		return tc.offCollector.writeSetEntity(chInstance, cacheID,
+			tc.cache[chInstance].cache[cacheID].value,
+			tc.cache[chInstance].cache[cacheID].expiryTime,
+			tc.cache[chInstance].cache[cacheID].groupIDs)
+	}
+	tc.offCollector.collect(chInstance, cacheID)
+	return
 }
 
 // RempveItem removes an item from the cache
@@ -312,11 +329,14 @@ func (tc *TransCache) GetCacheStats(chIDs []string) (cs map[string]*CacheStats) 
 }
 
 // NewTransCache instantiates a new TransCache with constructed OfflineCollector
-func NewTransCacheWithOfflineCollector(fldrPath string, dumpInterval, rewriteInterval time.Duration, writeLimit int, cfg map[string]*CacheConfig, l logger) (tc *TransCache) {
+func NewTransCacheWithOfflineCollector(fldrPath string, dumpInterval, rewriteInterval time.Duration, writeLimit int, cfg map[string]*CacheConfig, l logger) (tc *TransCache, err error) {
+	if err := ensureDir(fldrPath); err != nil {
+		return nil, err
+	}
 	if _, exists := cfg[DefaultCacheInstance]; !exists {
 		cfg[DefaultCacheInstance] = &CacheConfig{MaxItems: -1}
 	}
-	return &TransCache{
+	tc = &TransCache{
 		cache:             make(map[string]*Cache),
 		cfg:               cfg,
 		transactionBuffer: make(map[string][]*transactionItem),
@@ -338,13 +358,12 @@ func NewTransCacheWithOfflineCollector(fldrPath string, dumpInterval, rewriteInt
 			rewriteStopped:  make(chan struct{}),
 		},
 	}
+	err = tc.readAll()
+	return
 }
 
 // Reads from dump files and starts dynamicaly backing up the cache
-func (tc *TransCache) ReadAll() error {
-	if err := ensureDir(tc.offCollector.folderPath); err != nil {
-		return err
-	}
+func (tc *TransCache) readAll() error {
 
 	var wg sync.WaitGroup
 	errChan := make(chan error, 1)
@@ -462,7 +481,7 @@ func (tc *TransCache) WriteAll() error {
 				value := tc.cache[cachingInstance].cache[cacheID].value
 				expiryTime := tc.cache[cachingInstance].cache[cacheID].expiryTime
 				groupIDs := tc.cache[cachingInstance].cache[cacheID].groupIDs
-				if err := tc.offCollector.storeSetEntity(cachingInstance, cacheID, value,
+				if err := tc.offCollector.writeSetEntity(cachingInstance, cacheID, value,
 					expiryTime, groupIDs); err != nil {
 					errChan <- err
 					return

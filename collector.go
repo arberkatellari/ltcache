@@ -367,23 +367,8 @@ func (coll *OfflineCollector) checkAndRotateFile(chInstance string) error {
 	return nil
 }
 
-// Decides weather to write the cache on file instantly or put it in the collector to store in intervals
-func (coll *OfflineCollector) storeCache(chInstance, cacheID string, value any,
-	expiryTime time.Time, groupIDs []string) (err error) {
-	if coll.dumpInterval == 0 {
-		return
-	}
-	if coll.dumpInterval == -1 {
-		coll.setCollMux[chInstance].Lock()
-		defer coll.setCollMux[chInstance].Unlock()
-		return coll.storeSetEntity(chInstance, cacheID, value, expiryTime, groupIDs)
-	}
-	coll.collect(chInstance, cacheID)
-	return
-}
-
 // Writes the SET Cache on file
-func (coll *OfflineCollector) storeSetEntity(chInstance, cacheID string, value any,
+func (coll *OfflineCollector) writeSetEntity(chInstance, cacheID string, value any,
 	expiryTime time.Time, groupIDs []string) error {
 	if err := coll.checkAndRotateFile(chInstance); err != nil {
 		return err
