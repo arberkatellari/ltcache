@@ -54,9 +54,9 @@ func TestEnsureDirErr(t *testing.T) {
 
 func TestPopulateEncoders(t *testing.T) {
 	offC := &OfflineCollector{
-		files:    make(map[string]*os.File),
-		writers:  make(map[string]*bufio.Writer),
-		encoders: make(map[string]*gob.Encoder),
+		file:    make(map[string]*os.File),
+		writer:  make(map[string]*bufio.Writer),
+		encoder: make(map[string]*gob.Encoder),
 	}
 	if err := os.MkdirAll("/tmp/testOff/*default", 0755); err != nil {
 		t.Error(err)
@@ -73,7 +73,7 @@ func TestPopulateEncoders(t *testing.T) {
 
 func TestPopulateEncodersErr(t *testing.T) {
 	offC := &OfflineCollector{
-		files: map[string]*os.File{
+		file: map[string]*os.File{
 			"*default": nil,
 		},
 	}
@@ -200,15 +200,15 @@ func TestReadAndDecodeFileDecodeSet(t *testing.T) {
 	} else {
 		defer f.Close()
 		enc := gob.NewEncoder(f)
-		enc.Encode(OfflineCacheEntity{
+		enc.Encode(CollIdentifier{
 			IsSet:    true,
 			CacheID:  "testID",
 			Value:    "value",
 			GroupIDs: []string{"gpID"},
 		})
 	}
-	oce := map[string]*OfflineCacheEntity{}
-	exp := map[string]*OfflineCacheEntity{
+	oce := map[string]*CollIdentifier{}
+	exp := map[string]*CollIdentifier{
 		"testID": {IsSet: true, CacheID: "testID", Value: "value",
 			GroupIDs: []string{"gpID"}},
 	}
@@ -232,14 +232,14 @@ func TestReadAndDecodeFileDecodeRemove(t *testing.T) {
 	} else {
 		defer f.Close()
 		enc := gob.NewEncoder(f)
-		enc.Encode(OfflineCacheEntity{
+		enc.Encode(CollIdentifier{
 			IsSet:    false,
 			CacheID:  "testID",
 			Value:    "value",
 			GroupIDs: []string{"gpID"},
 		})
 	}
-	oce := map[string]*OfflineCacheEntity{
+	oce := map[string]*CollIdentifier{
 		"testID": {
 			IsSet:    false,
 			CacheID:  "testID",
@@ -247,7 +247,7 @@ func TestReadAndDecodeFileDecodeRemove(t *testing.T) {
 			GroupIDs: []string{"gpID"},
 		},
 	}
-	exp := map[string]*OfflineCacheEntity{}
+	exp := map[string]*CollIdentifier{}
 	if err := readAndDecodeFile(path+"/file", oce); err != nil {
 		t.Error(err)
 	}
@@ -258,14 +258,14 @@ func TestReadAndDecodeFileDecodeRemove(t *testing.T) {
 
 func TestReadAndDecodeFileErr1(t *testing.T) {
 	expErr := "error opening file <> in memory: open : no such file or directory"
-	if err := readAndDecodeFile("", map[string]*OfflineCacheEntity{}); err == nil ||
+	if err := readAndDecodeFile("", map[string]*CollIdentifier{}); err == nil ||
 		err.Error() != expErr {
 		t.Errorf("Expected error <%v>, Received <%v>", expErr, err)
 	}
 }
 
 func TestOfflineCacheEntityToCachedItem(t *testing.T) {
-	oce := &OfflineCacheEntity{
+	oce := &CollIdentifier{
 		IsSet:    false,
 		CacheID:  "testID",
 		Value:    "value",
@@ -320,7 +320,7 @@ func TestOfflineCacheSetTTL(t *testing.T) {
 }
 
 func TestNewCacheFromDump(t *testing.T) {
-	offE := map[string]*OfflineCacheEntity{
+	offE := map[string]*CollIdentifier{
 		"CacheID1": {
 			IsSet:    true,
 			CacheID:  "CacheID1",
@@ -351,10 +351,10 @@ func TestNewCacheFromDump(t *testing.T) {
 func TestOfflineCollectorCollect(t *testing.T) {
 	oc := &OfflineCollector{
 		setCollMux: map[string]*sync.RWMutex{"*default": new(sync.RWMutex)},
-		setColl:    map[string]map[string]*OfflineCacheEntity{"*default": nil},
+		setColl:    map[string]map[string]*CollIdentifier{"*default": nil},
 	}
 	expOC := &OfflineCollector{
-		setColl: map[string]map[string]*OfflineCacheEntity{
+		setColl: map[string]map[string]*CollIdentifier{
 			"*default": {
 				"CacheID1": {
 					IsSet:   true,
@@ -378,12 +378,12 @@ func TestClearOfflineInstance(t *testing.T) {
 	var logBuf bytes.Buffer
 	oc := &OfflineCollector{
 		folderPath: "/tmp",
-		files:      make(map[string]*os.File),
-		writers:    make(map[string]*bufio.Writer),
-		encoders:   make(map[string]*gob.Encoder),
+		file:       make(map[string]*os.File),
+		writer:     make(map[string]*bufio.Writer),
+		encoder:    make(map[string]*gob.Encoder),
 		logger:     &testLogger{log.New(&logBuf, "", 0)},
 		setCollMux: map[string]*sync.RWMutex{"*default": new(sync.RWMutex)},
-		setColl: map[string]map[string]*OfflineCacheEntity{
+		setColl: map[string]map[string]*CollIdentifier{
 			"*default": {
 				"CacheID1": {
 					IsSet:   true,
@@ -395,7 +395,7 @@ func TestClearOfflineInstance(t *testing.T) {
 	}
 	oc.clearOfflineInstance("*default")
 	expOC := &OfflineCollector{
-		setColl: map[string]map[string]*OfflineCacheEntity{
+		setColl: map[string]map[string]*CollIdentifier{
 			"*default": {},
 		},
 		remColl: map[string][]string{"*default": {}},
@@ -454,7 +454,7 @@ func TestClearOfflineInstanceErr1(t *testing.T) {
 	oc := &OfflineCollector{
 		logger:     &testLogger{log.New(&logBuf, "", 0)},
 		setCollMux: map[string]*sync.RWMutex{"*default": new(sync.RWMutex)},
-		setColl: map[string]map[string]*OfflineCacheEntity{
+		setColl: map[string]map[string]*CollIdentifier{
 			"*default": {
 				"CacheID1": {
 					IsSet:   true,
@@ -475,8 +475,8 @@ func TestOfflineCollectorWriteRemoveEntity(t *testing.T) {
 	oc := &OfflineCollector{
 		remColl:    map[string][]string{"*default": {"CacheID2"}},
 		writeLimit: -1,
-		writers:    map[string]*bufio.Writer{"*default": bufio.NewWriter(&bytes.Buffer{})},
-		encoders:   map[string]*gob.Encoder{"*default": gob.NewEncoder(&bytes.Buffer{})},
+		writer:     map[string]*bufio.Writer{"*default": bufio.NewWriter(&bytes.Buffer{})},
+		encoder:    map[string]*gob.Encoder{"*default": gob.NewEncoder(&bytes.Buffer{})},
 	}
 	if err := oc.writeRemoveEntity("*default"); err != nil {
 		t.Error(err)
@@ -511,17 +511,17 @@ func TestOfflineCollectorCheckAndRotateFile(t *testing.T) {
 	}()
 	oc := &OfflineCollector{
 		folderPath: "/tmp/internal_db",
-		files:      map[string]*os.File{"*default": tmpFile},
-		writers:    make(map[string]*bufio.Writer),
-		encoders:   make(map[string]*gob.Encoder),
+		file:       map[string]*os.File{"*default": tmpFile},
+		writer:     make(map[string]*bufio.Writer),
+		encoder:    make(map[string]*gob.Encoder),
 		writeLimit: -2,
 	}
 	if err := oc.checkAndRotateFile("*default"); err != nil {
 		t.Error(err)
-	} else if _, has := oc.writers["*default"]; !has {
-		t.Errorf("Expected *default writer to be created, \nReceived <%+v>", oc.writers)
-	} else if _, has := oc.encoders["*default"]; !has {
-		t.Errorf("Expected *default writer to be created, \nReceived <%+v>", oc.encoders)
+	} else if _, has := oc.writer["*default"]; !has {
+		t.Errorf("Expected *default writer to be created, \nReceived <%+v>", oc.writer)
+	} else if _, has := oc.encoder["*default"]; !has {
+		t.Errorf("Expected *default writer to be created, \nReceived <%+v>", oc.encoder)
 	}
 }
 
@@ -540,7 +540,7 @@ func TestOfflineCollectorCheckAndRotateFileErr(t *testing.T) {
 		}
 	}()
 	oc := &OfflineCollector{
-		files:      map[string]*os.File{"*default": tmpFile},
+		file:       map[string]*os.File{"*default": tmpFile},
 		writeLimit: -2,
 	}
 	expErr := "no such file or directory"
@@ -553,7 +553,7 @@ func TestOfflineCollectorCheckAndRotateFileErr(t *testing.T) {
 func TestOfflineCollectorStoreCacheDumpInterval0(t *testing.T) {
 	oc := &OfflineCollector{
 		dumpInterval: 0,
-		setColl: map[string]map[string]*OfflineCacheEntity{
+		setColl: map[string]map[string]*CollIdentifier{
 			"*default": {
 				"CacheID1": {
 					IsSet:   true,
@@ -577,8 +577,8 @@ func TestOfflineCollectorStoreCacheDumpIntervalMinus1(t *testing.T) {
 		setCollMux:   map[string]*sync.RWMutex{"*default": new(sync.RWMutex)},
 		dumpInterval: -1,
 		writeLimit:   -1,
-		encoders:     map[string]*gob.Encoder{"*default": gob.NewEncoder(encBuf)},
-		writers:      map[string]*bufio.Writer{"*default": bufio.NewWriter(writeBuf)},
+		encoder:      map[string]*gob.Encoder{"*default": gob.NewEncoder(encBuf)},
+		writer:       map[string]*bufio.Writer{"*default": bufio.NewWriter(writeBuf)},
 	}
 	expOC := oc
 	if err := oc.storeCache("*default", "CacheID1", "CacheValue1", time.Time{},
@@ -589,8 +589,8 @@ func TestOfflineCollectorStoreCacheDumpIntervalMinus1(t *testing.T) {
 	}
 
 	dec := gob.NewDecoder(encBuf)
-	var oce *OfflineCacheEntity
-	expOCE := &OfflineCacheEntity{
+	var oce *CollIdentifier
+	expOCE := &CollIdentifier{
 		IsSet:      true,
 		CacheID:    "CacheID1",
 		Value:      "CacheValue1",
@@ -610,14 +610,14 @@ func TestOfflineCollectorStoreCacheDumpIntervalMinus1(t *testing.T) {
 func TestOfflineCollectorStoreCacheDumpInterval(t *testing.T) {
 	oc := &OfflineCollector{
 		dumpInterval: time.Second,
-		setColl: map[string]map[string]*OfflineCacheEntity{
+		setColl: map[string]map[string]*CollIdentifier{
 			"*default": {},
 		},
 		setCollMux: map[string]*sync.RWMutex{"*default": new(sync.RWMutex)},
 	}
 	expOC := &OfflineCollector{
 		dumpInterval: time.Second,
-		setColl: map[string]map[string]*OfflineCacheEntity{
+		setColl: map[string]map[string]*CollIdentifier{
 			"*default": {
 				"CacheID1": {
 					IsSet:   true,
@@ -650,8 +650,8 @@ func TestOfflineCollectorStoreRemoveEntityNoInterval(t *testing.T) {
 		dumpInterval: -1,
 		writeLimit:   -1,
 		setCollMux:   map[string]*sync.RWMutex{"*default": new(sync.RWMutex)},
-		writers:      map[string]*bufio.Writer{"*default": bufio.NewWriter(&bytes.Buffer{})},
-		encoders:     map[string]*gob.Encoder{"*default": gob.NewEncoder(&encBuf)},
+		writer:       map[string]*bufio.Writer{"*default": bufio.NewWriter(&bytes.Buffer{})},
+		encoder:      map[string]*gob.Encoder{"*default": gob.NewEncoder(&encBuf)},
 	}
 	bufExpect := "OfflineCacheEntity"
 	oc.storeRemoveEntity("*default", "CacheID1")
@@ -678,7 +678,7 @@ func TestOfflineCollectorStoreRemoveEntityErr1(t *testing.T) {
 func TestOfflineCollectorStoreRemoveEntityInterval(t *testing.T) {
 	oc := &OfflineCollector{
 		setCollMux: map[string]*sync.RWMutex{"*default": new(sync.RWMutex)},
-		setColl: map[string]map[string]*OfflineCacheEntity{
+		setColl: map[string]map[string]*CollIdentifier{
 			"*default": {
 				"CacheID1": {
 					IsSet:   true,
@@ -824,15 +824,15 @@ func TestOCRewriteShouldContinue(t *testing.T) {
 	var encBuf bytes.Buffer
 	oc := OfflineCollector{
 		writeLimit: 1,
-		files: map[string]*os.File{
+		file: map[string]*os.File{
 			"*default": f,
 		},
 		folderPath: "/tmp/internal_db",
-		writers:    make(map[string]*bufio.Writer),
-		encoders:   make(map[string]*gob.Encoder),
+		writer:     make(map[string]*bufio.Writer),
+		encoder:    make(map[string]*gob.Encoder),
 	}
-	oc.writers["*default"] = bufio.NewWriter(oc.files["*default"])
-	oc.encoders["*default"] = gob.NewEncoder(oc.writers["*default"])
+	oc.writer["*default"] = bufio.NewWriter(oc.file["*default"])
+	oc.encoder["*default"] = gob.NewEncoder(oc.writer["*default"])
 	if err := oc.storeSetEntity("*default", "CacheID", "sampleValue", time.Time{}, []string{"CacheGroup1"}); err != nil {
 		t.Error(err)
 	}

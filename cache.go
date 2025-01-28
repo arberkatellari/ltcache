@@ -48,6 +48,8 @@ type Cache struct {
 	lruRefs map[string]*list.Element // index the list element based on it's key in cache
 	ttlIdx  *list.List
 	ttlRefs map[string]*list.Element // index the list element based on it' key in cache
+
+	offCollector *OfflineCollector // used to temporarily hold caching instances, until dumped to file
 }
 
 // New initializes a new cache.

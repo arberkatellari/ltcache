@@ -34,26 +34,32 @@ const (
 
 // Used to temporarily hold caching instances, until dumped to file
 type OfflineCollector struct {
-	setCollMux      map[string]*sync.RWMutex                  // lock setColl per cachingInstance so that we dont dump while modifying them
-	remCollMux      sync.RWMutex                              // used to lock remColl map
-	allCollMux      sync.RWMutex                              // used to lock all of the setColl map
-	rewriteMux      sync.RWMutex                              // lock rewriting process
-	fileMux         sync.RWMutex                              // used to lock the maps of files, writers and encoders, so we dont have concurrency while writing/reading
-	setColl         map[string]map[string]*OfflineCacheEntity // map[cachingInstance]map[cacheItemKey]*item   Collects all key-values SET on cache
-	remColl         map[string][]string                       // map[cachingInstance][]cacheItemKey Collects all keys to be removed from files and setColl
-	folderPath      string                                    // path to the database dump folder
-	dumpInterval    time.Duration                             // holds duration to wait until next dump
-	rewriteInterval time.Duration                             // holds duration to wait until next rewrite
-	files           map[string]*os.File                       // holds the files opened
-	writers         map[string]*bufio.Writer                  // holds the buffer writers per caching instance, used to flush after writing
-	encoders        map[string]*gob.Encoder                   // holds encoder per caching instance
-	writeLimit      int                                       // maximum size in MiB that can be written in a singular dump file
-	logger          logger
-
+	setCollMux *sync.RWMutex // lock setColl per cachingInstance so that we dont dump while modifying them
+	remCollMux sync.RWMutex  // used to lock remColl map
+	// allCollMux   sync.RWMutex                   // used to lock all of the setColl map
+	rewriteMux   sync.RWMutex                     // lock rewriting process
+	fileMux      sync.RWMutex                     // used to lock the maps of files, writers and encoders, so we dont have concurrency while writing/reading
+	setColl      map[string]*CollectionIdentifier // map[cacheItemKey]*item   Collects all key-values SET on cache
+	remColl      []string                         // []cacheItemKey Collects all keys to be removed from files and setColl
+	folderPath   string                           // path to the database dump folder
+	dumpInterval time.Duration                    // holds duration to wait until next dump
+	// rewriteInterval time.Duration                  // holds duration to wait until next rewrite
+	file           *os.File      // holds the files opened
+	writer         *bufio.Writer // holds the buffer writers per caching instance, used to flush after writing
+	encoder        *gob.Encoder  // holds encoder per caching instance
+	writeLimit     int           // maximum size in MiB that can be written in a singular dump file
+	logger         logger
+	chInstance     string        // holds the name of the cache instance it contains
 	stopWriting    chan struct{} // Used to stop inverval writing
 	writeStopped   chan struct{} // signal when writing is finished
 	stopRewrite    chan struct{} // Used to stop inverval rewrite
 	rewriteStopped chan struct{} // signal when writing is finished
+}
+
+// Used to temporarily hold cache items in memory, until dumped to file
+type CollectionIdentifier struct {
+	IsSet   bool   // Controls if the item that is written is a set or a remove of the item
+	CacheID string // Holds the cache ID of the item to be stored in file
 }
 
 // Used to temporarily hold cache items in memory, until dumped to file
@@ -99,20 +105,20 @@ func ensureDir(path string) error {
 }
 
 // open/create dump file, connect an encoder to it and store that encoder to the OfflineCollector
-func (coll *OfflineCollector) populateEncoders(chInstance string) error {
-	filePath := filepath.Join(coll.folderPath, chInstance, strconv.FormatInt(time.Now().UnixMilli(), 10)) // path of the dump file of current caching instance, in miliseconds in case a rewrite happens withing a second of a dump file created
+func (coll *OfflineCollector) populateEncoders() error {
+	filePath := filepath.Join(coll.folderPath, coll.chInstance, strconv.FormatInt(time.Now().UnixMilli(), 10)) // path of the dump file of current caching instance, in miliseconds in case a rewrite happens withing a second of a dump file created
 	var err error
-	coll.files[chInstance], err = os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	coll.file, err = os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
-	coll.writers[chInstance] = bufio.NewWriter(coll.files[chInstance])
-	coll.encoders[chInstance] = gob.NewEncoder(coll.writers[chInstance])
+	coll.writer = bufio.NewWriter(coll.file)
+	coll.encoder = gob.NewEncoder(coll.writer)
 	return nil
 }
 
 // Read dump files per caching instance and recover to new transCache
-func processDumpFiles(chInstance, fldrPath string, maxItems int, ttl time.Duration, staticTTL bool, tc *TransCache, tcCacheMux *sync.RWMutex) error {
+func processDumpFiles(chInstance, fldrPath string, maxEntries int, ttl time.Duration, staticTTL bool, tc *TransCache) error {
 	offEntity := make(map[string]*OfflineCacheEntity) // struct to decode to from file [cacheID]cacheData
 	filePaths, err := getFilePaths(path.Join(fldrPath, chInstance))
 	if err != nil {
@@ -122,16 +128,67 @@ func processDumpFiles(chInstance, fldrPath string, maxItems int, ttl time.Durati
 	if err != nil {
 		return err
 	}
+	cache := &Cache{
+		cache:      make(map[string]*cachedItem),
+		groups:     make(map[string]map[string]struct{}),
+		onEvicted:  func(itemID string, _ any) { tc.offCollector.storeRemoveEntity(chInstance, itemID) },
+		maxEntries: maxEntries,
+		ttl:        ttl,
+		staticTTL:  staticTTL,
+		lruIdx:     list.New(),
+		lruRefs:    make(map[string]*list.Element),
+		ttlIdx:     list.New(),
+		ttlRefs:    make(map[string]*list.Element),
+		offCollector: &OfflineCollector{
+
+			stopWriting:    make(chan struct{}),
+			writeStopped:   make(chan struct{}),
+			stopRewrite:    make(chan struct{}),
+			rewriteStopped: make(chan struct{}),
+		},
+	}
+
 	for _, filepath := range paths {
-		if err := readAndDecodeFile(filepath, offEntity); err != nil {
-			return err
+		r, err := mmap.Open(filepath) // open mmap reader
+		if err != nil {
+			return fmt.Errorf("error opening file <%s> in memory: %w", filepath, err)
+		}
+		defer r.Close()
+		p := make([]byte, r.Len()) // read into byte slice
+		if _, err = r.ReadAt(p, 0); err != nil {
+			return fmt.Errorf("error reading file <%s> in memory: %w", filepath, err)
+		}
+		dec := gob.NewDecoder(bufio.NewReader(bytes.NewReader(p)))
+		for {
+			var oce *OfflineCacheEntity
+			if err := dec.Decode(&oce); err != nil {
+				if err == io.EOF {
+					break
+				}
+				return fmt.Errorf("failed to decode OfflineCacheEntity at <%s>: %w", filepath, err)
+			}
+			// If the decoded OfflineCacheEntity is a set command populate offEntity
+			if oce.IsSet {
+				// offEntity[oce.CacheID] = oce
+				cache.cache[oce.CacheID] = oce.toCachedItem()
+				cache.set(oce.CacheID, cache.cache[oce.CacheID])
+				cache.addItemToGroups(oce.CacheID, oce.GroupIDs)
+
+			} else { // if its a remove command, delete it from offEntity
+				delete(offEntity, oce.CacheID)
+			}
 		}
 	}
-	tcCacheMux.Lock()
+
+	if cache.ttl > 0 {
+		go cache.cleanExpired()
+	}
+	tc.cache[chInstance] = cache
+	// tcCacheMux.Lock()
 	// Populate TransCache Caches
-	tc.cache[chInstance] = newCacheFromDump(offEntity, maxItems, ttl, staticTTL,
-		func(itemID string, _ any) { tc.offCollector.storeRemoveEntity(chInstance, itemID) })
-	tcCacheMux.Unlock()
+	// tc.cache[chInstance] = newCacheFromDump(offEntity, maxEntries, ttl, staticTTL,
+	// 	func(itemID string, _ any) { tc.offCollector.storeRemoveEntity(chInstance, itemID) })
+	// tcCacheMux.Unlock()
 	return nil
 }
 
@@ -254,6 +311,13 @@ func newCacheFromDump(offEntity map[string]*OfflineCacheEntity, maxEntries int, 
 		lruRefs:    make(map[string]*list.Element),
 		ttlIdx:     list.New(),
 		ttlRefs:    make(map[string]*list.Element),
+		offCollector: &OfflineCollector{
+
+			stopWriting:    make(chan struct{}),
+			writeStopped:   make(chan struct{}),
+			stopRewrite:    make(chan struct{}),
+			rewriteStopped: make(chan struct{}),
+		},
 	}
 	for chID, item := range offEntity {
 		cache.cache[chID] = item.toCachedItem()
@@ -294,7 +358,7 @@ func (coll *OfflineCollector) clearOfflineInstance(cacheInstance string) {
 	coll.remCollMux.Unlock()
 	coll.fileMux.Lock()
 	defer coll.fileMux.Unlock()
-	coll.files[cacheInstance].Close()
+	coll.file[cacheInstance].Close()
 	// remove the dump files if they exist
 	if filePaths, err := getFilePaths(path.Join(coll.folderPath, cacheInstance)); err != nil {
 		coll.logger.Err("Error walking the path: " + err.Error())
@@ -324,53 +388,69 @@ func encodeAndWrite(oce OfflineCacheEntity, enc *gob.Encoder, w *bufio.Writer) e
 }
 
 // Will write remove entities to file correlating to the cacheIDs set on remColl
-func (coll *OfflineCollector) writeRemoveEntity(chInstance string) error {
+func (coll *OfflineCollector) writeRemoveEntity() error {
 	coll.remCollMux.Lock()
 	defer coll.remCollMux.Unlock()
-	for _, key := range coll.remColl[chInstance] {
-		if err := coll.checkAndRotateFile(chInstance); err != nil {
+	for _, key := range coll.remColl {
+		if err := coll.checkAndRotateFile(); err != nil {
 			return err
 		}
 		coll.fileMux.Lock()
 		if err := encodeAndWrite(OfflineCacheEntity{
 			IsSet:   false,
 			CacheID: key,
-		}, coll.encoders[chInstance], coll.writers[chInstance]); err != nil {
+		}, coll.encoder, coll.writer); err != nil {
 			coll.fileMux.Unlock()
-			return fmt.Errorf("failed to encode or write cache item Remove for <%s> cacheID <%s>: %w", chInstance, key, err)
+			return fmt.Errorf("failed to encode or write cache item Remove for <%s> cacheID <%s>: %w", coll.chInstance, key, err)
 		}
 		coll.fileMux.Unlock()
 	}
-	delete(coll.remColl, chInstance) // clear remove collection
+	coll.remColl = []string{} // clear remove collection
+	// delete(coll.remColl, chInstance) // clear remove collection
 	return nil
 }
 
 // checkAndRotateFile checks the size of the file and rotates it if it exceeds the limit.
-func (coll *OfflineCollector) checkAndRotateFile(chInstance string) error {
+func (coll *OfflineCollector) checkAndRotateFile() error {
 	if coll.writeLimit == -1 {
 		return nil
 	}
 	coll.fileMux.Lock()
 	defer coll.fileMux.Unlock()
-	fileStat, err := coll.files[chInstance].Stat()
+	fileStat, err := coll.file.Stat()
 	if err != nil {
 		return fmt.Errorf("error getting file stat: %w", err)
 	}
 	if fileStat.Size() > int64(coll.writeLimit)*1024*1024 {
-		if err := coll.files[chInstance].Close(); err != nil {
+		if err := coll.file.Close(); err != nil {
 			return fmt.Errorf("error closing file: %w", err)
 		}
-		if err := coll.populateEncoders(chInstance); err != nil {
+		if err := coll.populateEncoders(); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// Decides weather to write the cache on file instantly or put it in the collector to store in intervals
+func (coll *OfflineCollector) storeCache(chInstance, cacheID string, value any,
+	expiryTime time.Time, groupIDs []string) (err error) {
+	if coll.dumpInterval == 0 {
+		return
+	}
+	if coll.dumpInterval == -1 {
+		coll.setCollMux[chInstance].Lock()
+		defer coll.setCollMux[chInstance].Unlock()
+		return coll.writeSetEntity(chInstance, cacheID, value, expiryTime, groupIDs)
+	}
+	coll.collect(chInstance, cacheID)
+	return
+}
+
 // Writes the SET Cache on file
-func (coll *OfflineCollector) writeSetEntity(chInstance, cacheID string, value any,
+func (coll *OfflineCollector) writeSetEntity(cacheID string, value any,
 	expiryTime time.Time, groupIDs []string) error {
-	if err := coll.checkAndRotateFile(chInstance); err != nil {
+	if err := coll.checkAndRotateFile(); err != nil {
 		return err
 	}
 	coll.fileMux.Lock()
@@ -381,8 +461,8 @@ func (coll *OfflineCollector) writeSetEntity(chInstance, cacheID string, value a
 		Value:      value,
 		GroupIDs:   groupIDs,
 		ExpiryTime: expiryTime,
-	}, coll.encoders[chInstance], coll.writers[chInstance]); err != nil {
-		coll.logger.Err("Failed to encode or write cache item for <" + chInstance + ">: " + err.Error())
+	}, coll.encoder, coll.writer); err != nil {
+		coll.logger.Err("Failed to encode or write cache item for <" + coll.chInstance + ">: " + err.Error())
 		return err
 	}
 	return nil
@@ -400,7 +480,7 @@ func (coll *OfflineCollector) storeRemoveEntity(cachingInstance, cacheID string)
 		if err := encodeAndWrite(OfflineCacheEntity{
 			IsSet:   false,
 			CacheID: cacheID,
-		}, coll.encoders[cachingInstance], coll.writers[cachingInstance]); err != nil {
+		}, coll.encoder[cachingInstance], coll.writer[cachingInstance]); err != nil {
 			coll.logger.Err("Failed to encode or write RemoveEntity for <" + cachingInstance + "> cacheID <" +
 				cacheID + ">: " + err.Error())
 			return
@@ -432,18 +512,18 @@ func closeFile(file *os.File) error {
 }
 
 // Rewrite dump files on every rewriteInterval
-func (coll *OfflineCollector) runRewrite() {
-	if coll.rewriteInterval <= 0 {
-		close(coll.rewriteStopped)
+func (tc *TransCache) runRewrite() {
+	if tc.rewriteInterval <= 0 {
+		close(tc.rewriteStopped)
 		return
 	}
 	for {
 		select {
-		case <-coll.stopRewrite: // in case engine is shutdown before interval, dont wait for it
-			close(coll.rewriteStopped)
+		case <-tc.stopRewrite: // in case engine is shutdown before interval, dont wait for it
+			close(tc.rewriteStopped)
 			return
-		case <-time.After(coll.rewriteInterval): // no need to instantly rewrite right after reading from files
-			coll.rewrite()
+		case <-time.After(tc.rewriteInterval): // no need to instantly rewrite right after reading from files
+			tc.rewrite()
 		}
 	}
 }
@@ -571,7 +651,7 @@ func (coll *OfflineCollector) rewrite() {
 func (coll *OfflineCollector) shouldContinue(chInstance string, filePaths []string, subFolderPath string) bool {
 	coll.fileMux.Lock()
 	defer coll.fileMux.Unlock()
-	fileStat, _ := coll.files[chInstance].Stat() // Get stat of dump file in current use
+	fileStat, _ := coll.file[chInstance].Stat() // Get stat of dump file in current use
 	var nonRewriteFiles int
 	for _, fileName := range filePaths {
 		if !strings.HasPrefix(fileName, path.Join(subFolderPath, rewriteFileName)) {
@@ -586,8 +666,8 @@ func (coll *OfflineCollector) shouldContinue(chInstance string, filePaths []stri
 		return true
 	}
 	// Close current open file so that we can rewrite it
-	if err := coll.files[chInstance].Close(); err != nil {
-		coll.logger.Err("error closing file <" + coll.files[chInstance].Name() + ">: " + err.Error())
+	if err := coll.file[chInstance].Close(); err != nil {
+		coll.logger.Err("error closing file <" + coll.file[chInstance].Name() + ">: " + err.Error())
 		return true // dont rewrite if errored
 	}
 	// Open a new file to continue to write
