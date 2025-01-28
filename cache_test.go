@@ -9,18 +9,24 @@ A LRU cache with TTL capabilities.
 package ltcache
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/gob"
+	"log"
 	"math/rand"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
 
 var testCIs = []*cachedItem{
-	&cachedItem{itemID: "_1_", value: "one"},
-	&cachedItem{itemID: "_2_", value: "two", groupIDs: []string{"grp1"}},
-	&cachedItem{itemID: "_3_", value: "three", groupIDs: []string{"grp1", "grp2"}},
-	&cachedItem{itemID: "_4_", value: "four", groupIDs: []string{"grp1", "grp2", "grp3"}},
-	&cachedItem{itemID: "_5_", value: "five", groupIDs: []string{"grp4"}},
+	{itemID: "_1_", value: "one"},
+	{itemID: "_2_", value: "two", groupIDs: []string{"grp1"}},
+	{itemID: "_3_", value: "three", groupIDs: []string{"grp1", "grp2"}},
+	{itemID: "_4_", value: "four", groupIDs: []string{"grp1", "grp2", "grp3"}},
+	{itemID: "_5_", value: "five", groupIDs: []string{"grp4"}},
 }
 var lastEvicted string
 
@@ -441,6 +447,169 @@ func TestCacheGetItemExpiryTime(t *testing.T) {
 
 	if rcv != exp {
 		t.Errorf("\nexpected: <%+v>, \nreceived: <%+v>", exp, rcv)
+	}
+}
+
+func TestCacheSetWithOffCollector(t *testing.T) {
+	var logBuf bytes.Buffer
+	c := NewCache(-1, 0, false, func(itmID string, value interface{}) {})
+	c.offCollector = &OfflineCollector{
+		collectSetEntity: true,
+		collection: map[string]*CollectionEntity{
+			"CacheID1": {},
+		},
+		logger: &testLogger{log.New(&logBuf, "", 0)},
+	}
+
+	c.Set("CacheID1", "CacheValue1", []string{"CacheGroup1"})
+	if t1, ok := c.Get("CacheID1"); !ok || t1 != "CacheValue1" {
+		t.Errorf("Expected <CacheValue1>, received <%+v>", t1)
+	}
+	if rcv := logBuf.String(); !strings.Contains(rcv, "") {
+		t.Errorf("Expected <%+v>, \nReceived <%+v>", "", rcv)
+	}
+	expOC := &OfflineCollector{
+		collectSetEntity: true,
+		collection: map[string]*CollectionEntity{
+			"CacheID1": {
+				IsSet:  true,
+				ItemID: "CacheID1",
+			},
+		},
+		logger: c.offCollector.logger,
+	}
+	if !reflect.DeepEqual(expOC, c.offCollector) {
+		t.Errorf("Expected <%+v>, \nReceived <%+v>", expOC, c.offCollector)
+	}
+}
+
+func TestCacheSetWithOffCollectorErr(t *testing.T) {
+	var logBuf bytes.Buffer
+	c := NewCache(-1, 0, false, func(itmID string, value interface{}) {})
+	f, err := os.OpenFile("/tmp/tmpfile", os.O_APPEND|os.O_CREATE|os.O_WRONLY,
+		0644)
+	if err != nil {
+		t.Error(err)
+	}
+	f.Close()
+	defer func() {
+		if err := os.RemoveAll("/tmp/tmpfile"); err != nil {
+			t.Errorf("Failed to delete temporary file: %v", err)
+		}
+	}()
+	c.offCollector = &OfflineCollector{
+		collectSetEntity: false,
+		writeLimit:       1,
+		file:             f,
+		logger:           &testLogger{log.New(&logBuf, "", 0)},
+	}
+
+	c.Set("CacheID1", "CacheValue1", []string{"CacheGroup1"})
+	if t1, ok := c.Get("CacheID1"); !ok || t1 != "CacheValue1" {
+		t.Errorf("Expected <CacheValue1>, received <%+v>", t1)
+	}
+	expErr := "error getting file stat: stat /tmp/tmpfile: file already closed"
+	if rcv := logBuf.String(); !strings.Contains(rcv, expErr) {
+		t.Errorf("Expected <%+v>, \nReceived <%+v>", expErr, rcv)
+	}
+}
+
+func TestCacheDumpToFile(t *testing.T) {
+	var logBuf bytes.Buffer
+	path := "/tmp/internal_db"
+	if err := os.MkdirAll(path+"/*default", 0755); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.RemoveAll(path); err != nil {
+			t.Errorf("Failed to delete temporary dir: %v", err)
+		}
+	}()
+	file, err := os.OpenFile(path+"/*default/file1", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Error(err)
+	}
+	writer := bufio.NewWriter(file)
+	encoder := gob.NewEncoder(writer)
+	c := NewCache(-1, 0, false, func(itmID string, value interface{}) {})
+	c.cache["item1"] = &cachedItem{itemID: "item1", value: "val1", groupIDs: []string{"gr1"}}
+	c.offCollector = &OfflineCollector{
+		file:    file,
+		writer:  writer,
+		encoder: encoder,
+		logger:  &testLogger{log.New(&logBuf, "", 0)},
+		collection: map[string]*CollectionEntity{
+			"item1": {
+				IsSet:  true,
+				ItemID: "item1",
+			},
+			"item2": {
+				IsSet:  false,
+				ItemID: "item2",
+			},
+		},
+	}
+	c.dumpToFile()
+	file.Close()
+	if !reflect.DeepEqual(map[string]*CollectionEntity{}, c.offCollector.collection) {
+		t.Errorf("Expected <%+v>, \nReceived <%+v>", "", c.offCollector.collection)
+	}
+	if rcv := logBuf.String(); !strings.Contains(rcv, "") {
+		t.Errorf("Expected <%+v>, \nReceived <%+v>", "", rcv)
+	}
+
+	files, err := os.ReadDir(path + "/*default")
+	if err != nil {
+		t.Error(err)
+	}
+	if len(files) != 1 {
+		t.Errorf("expected 1 file, received <%v>", files)
+	}
+	f, err := os.Open(path + "/*default/" + files[0].Name())
+	if err != nil {
+		t.Error(err)
+	}
+	dc := gob.NewDecoder(f)
+	var rcv *OfflineCacheEntity
+	if err := dc.Decode(&rcv); err != nil {
+		t.Error(err)
+	}
+	exp := []*OfflineCacheEntity{
+		{
+			IsSet:    true,
+			ItemID:   "item1",
+			Value:    "val1",
+			GroupIDs: []string{"gr1"},
+		},
+		{
+			IsSet:  false,
+			ItemID: "item2",
+		},
+	}
+	if !reflect.DeepEqual(exp[0], rcv) {
+		if !reflect.DeepEqual(exp[1], rcv) {
+			t.Errorf("expected <%+v>, received <%+v>", exp, rcv)
+		}
+	}
+	rcv = nil
+	if err := dc.Decode(&rcv); err != nil {
+		t.Error(err)
+	}
+	if !reflect.DeepEqual(exp[0], rcv) {
+		if !reflect.DeepEqual(exp[1], rcv) {
+			t.Errorf("expected <%+v>, received <%+v>", exp, rcv)
+		}
+	}
+	if err := dc.Decode(&rcv); err == nil || err.Error() != "EOF" {
+		t.Error(err)
+	}
+}
+
+func TestNewCacheFromFolderErr1(t *testing.T) {
+	_, err := newCacheFromFolder("/tmp/doesntExist", 0, 0, false, nil, 0, 0, nil)
+	expErr := "error walking the path: lstat /tmp/doesntExist: no such file or directory"
+	if err == nil || expErr != err.Error() {
+		t.Errorf("expected error <%+v>, received error <%+v>", expErr, err)
 	}
 }
 

@@ -8,16 +8,13 @@ TransCache is a bigger version of Cache with support for multiple Cache instance
 package ltcache
 
 import (
-	"bufio"
 	"crypto/rand"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"reflect"
-	"slices"
 	"sync"
 	"time"
 )
@@ -63,6 +60,16 @@ type CacheConfig struct {
 	OnEvicted func(itmID string, value interface{})
 }
 
+// used for shutdown options when using cache offlineCollector
+type collectorParams struct {
+	dumpInterval    time.Duration // holds duration to wait until next dump
+	stopDump        chan struct{} // Used to stop inverval writing
+	dumpStopped     chan struct{} // signal when writing is finished
+	rewriteInterval time.Duration // holds duration to wait until next rewrite
+	stopRewrite     chan struct{} // Used to stop inverval rewriting
+	rewriteStopped  chan struct{} // signal when rewriting is finished
+}
+
 // NewTransCache instantiates a new TransCache
 func NewTransCache(cfg map[string]*CacheConfig) (tc *TransCache) {
 	if _, has := cfg[DefaultCacheInstance]; !has { // Default always created
@@ -88,6 +95,8 @@ type TransCache struct {
 	transactionBuffer map[string][]*transactionItem // Queue tasks based on transactionID
 	transBufMux       sync.Mutex                    // Protects the transactionBuffer
 	transactionMux    sync.Mutex                    // Queue transactions on commit
+
+	collectorParams collectorParams // information needed for TransCache shutdown process when using offlineCollector
 }
 
 // cacheInstance returns a specific cache instance based on ID or default
@@ -153,15 +162,7 @@ func (tc *TransCache) Set(chID, itmID string, value interface{},
 			tc.cacheMux.Lock()
 			defer tc.cacheMux.Unlock()
 		}
-		c := tc.cacheInstance(chID)
-		c.Set(itmID, value, groupIDs)
-		if tc.offCollector != nil {
-			c.RLock()
-			if err := tc.storeCache(chID, itmID); err != nil {
-				tc.offCollector.logger.Err(err.Error())
-			}
-			c.RUnlock()
-		}
+		tc.cacheInstance(chID).Set(itmID, value, groupIDs)
 	} else {
 		tc.transBufMux.Lock()
 		tc.transactionBuffer[transID] = append(tc.transactionBuffer[transID],
@@ -170,23 +171,6 @@ func (tc *TransCache) Set(chID, itmID string, value interface{},
 				value: value, groupIDs: groupIDs})
 		tc.transBufMux.Unlock()
 	}
-}
-
-// Decides weather to write the cache on file instantly or put it in the collector to store in intervals
-func (tc *TransCache) storeCache(chInstance, cacheID string) (err error) {
-	if tc.offCollector.dumpInterval == 0 {
-		return
-	}
-	if tc.offCollector.dumpInterval == -1 {
-		tc.offCollector.setCollMux[chInstance].Lock()
-		defer tc.offCollector.setCollMux[chInstance].Unlock()
-		return tc.offCollector.writeSetEntity(chInstance, cacheID,
-			tc.cache[chInstance].cache[cacheID].value,
-			tc.cache[chInstance].cache[cacheID].expiryTime,
-			tc.cache[chInstance].cache[cacheID].groupIDs)
-	}
-	tc.offCollector.collect(chInstance, cacheID)
-	return
 }
 
 // RempveItem removes an item from the cache
@@ -323,9 +307,15 @@ func (tc *TransCache) GetCacheStats(chIDs []string) (cs map[string]*CacheStats) 
 	return
 }
 
-// NewTransCache instantiates a new TransCache with constructed OfflineCollector
+// NewTransCacheWithOfflineCollector constructs a new TransCache with OfflineCollector
+// which will dump the caches to fldrPath each dumpInterval(-1 dumps cache as soon as a
+// set/remove is done; 0 disables it). Cache configuration is taken from cfg and logs will
+// be sent to l logger. Limit the size of files in MiB with writeLimit (-1 disables it).
+// When size is exceeded a new file will open to dump the rest of cache items.
+// rewriteInterval will rewrite the dump files to streamline them in intervals (-2 rewrites
+// on shutdown, -1 rewrites before start of dumping, 0 disables it).
 func NewTransCacheWithOfflineCollector(fldrPath string, dumpInterval, rewriteInterval time.Duration, writeLimit int, cfg map[string]*CacheConfig, l logger) (tc *TransCache, err error) {
-	if err := ensureDir(fldrPath); err != nil {
+	if _, err = os.Stat(fldrPath); err != nil { // ensure directory exists
 		return nil, err
 	}
 	if _, exists := cfg[DefaultCacheInstance]; !exists {
@@ -335,201 +325,157 @@ func NewTransCacheWithOfflineCollector(fldrPath string, dumpInterval, rewriteInt
 		cache:             make(map[string]*Cache),
 		cfg:               cfg,
 		transactionBuffer: make(map[string][]*transactionItem),
-		offCollector: &OfflineCollector{
-			setCollMux:      make(map[string]*sync.RWMutex),
-			files:           make(map[string]*os.File),
-			writers:         make(map[string]*bufio.Writer),
-			encoders:        make(map[string]*gob.Encoder),
-			writeLimit:      writeLimit,
-			setColl:         make(map[string]map[string]*OfflineCacheEntity),
-			remColl:         make(map[string][]string),
-			folderPath:      fldrPath,
+		collectorParams: collectorParams{
 			dumpInterval:    dumpInterval,
 			rewriteInterval: rewriteInterval,
-			logger:          l,
-			stopWriting:     make(chan struct{}),
-			writeStopped:    make(chan struct{}),
+			stopDump:        make(chan struct{}),
+			dumpStopped:     make(chan struct{}),
 			stopRewrite:     make(chan struct{}),
 			rewriteStopped:  make(chan struct{}),
 		},
 	}
-	err = tc.readAll()
-	return
-}
-
-// Reads from dump files and starts dynamicaly backing up the cache
-func (tc *TransCache) readAll() error {
-
-	var wg sync.WaitGroup
-	errChan := make(chan error, 1)
-	done := make(chan struct{})
-	var tcCacheMux sync.RWMutex
-	for chInstance, config := range tc.cfg {
-		if err := ensureDir(path.Join(tc.offCollector.folderPath, chInstance)); err != nil {
-			return err
+	var wg sync.WaitGroup                   // wait for all goroutines to finish reading dump
+	errChan := make(chan error, 1)          // signal error from newCacheFromFolder
+	constructed := make(chan struct{})      // signal transCache constructed
+	for cacheName, config := range tc.cfg { // range over cfg to create each cache and populate TransCache.cache with them
+		if err := ensureDir(path.Join(fldrPath, cacheName)); err != nil {
+			return nil, err
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := processDumpFiles(chInstance, tc.offCollector.folderPath, config.MaxItems, config.TTL, config.StaticTTL, tc, &tcCacheMux); err != nil {
+			cache, err := newCacheFromFolder(path.Join(fldrPath, cacheName),
+				config.MaxItems, config.TTL, config.StaticTTL, l, writeLimit, dumpInterval, config.OnEvicted)
+			if err != nil {
 				errChan <- err
 				return
 			}
+			tc.cacheMux.Lock() // avoid locking all of tc.cache map while the caching instance isn't constructed yet
+			tc.cache[cacheName] = cache
+			tc.cacheMux.Unlock()
 		}()
-		if err := tc.offCollector.populateEncoders(chInstance); err != nil {
-			return err
-		}
-		tc.offCollector.setCollMux[chInstance] = new(sync.RWMutex)
 	}
-
-	go func() {
+	go func() { // wait in goroutine for reading from dump to be finished. In cases when an error is returned from newCacheFromFolder, instantly return the error and stop proccessing
 		wg.Wait()
-		if tc.offCollector.rewriteInterval == -1 {
-			tc.Rewrite()
-		}
-		close(done)
+		close(constructed)
 	}()
 
 	select {
 	case err := <-errChan:
-		return err
-	case <-done:
-		if tc.offCollector.rewriteInterval > 0 {
-			go tc.offCollector.runRewrite()
+		return nil, err
+	case <-constructed:
+		if rewriteInterval != 0 && rewriteInterval != -2 {
+			go tc.asyncRewriteEntities()
 		}
-		if tc.offCollector.dumpInterval == -1 {
-			return nil
+		if dumpInterval > 0 {
+			go tc.asyncDumpEntities()
 		}
-		go tc.asyncWriteEntities()
-		return nil
+		return tc, nil
 	}
 }
 
-// Write the OfflineCollection cache items on file every dumpInterval
-func (tc *TransCache) asyncWriteEntities() {
-	if tc.offCollector.dumpInterval <= 0 {
-		close(tc.offCollector.writeStopped)
+// asyncDumpEntities dumps the OfflineCollection cache items on file every dumpInterval
+func (tc *TransCache) asyncDumpEntities() {
+	for {
+		select {
+		case <-tc.collectorParams.stopDump: // in case of shutdown before interval, dont wait for it
+			tc.DumpAll()
+			tc.collectorParams.dumpStopped <- struct{}{}
+			return
+		case <-time.After(tc.collectorParams.dumpInterval): // no need to instantly dump right after reading from files
+			tc.DumpAll()
+		}
+	}
+}
+
+// asyncRewriteEntities rewrite dump files on every rewriteInterval
+func (tc *TransCache) asyncRewriteEntities() {
+	if tc.collectorParams.rewriteInterval == -1 {
+		tc.RewriteAll()
 		return
 	}
 	for {
 		select {
-		case <-tc.offCollector.stopWriting: // in case engine is shutdown before interval, dont wait for it
-			close(tc.offCollector.writeStopped)
+		case <-tc.collectorParams.stopRewrite: // in case of shutdown before interval, dont wait for it
+			tc.RewriteAll()
+			tc.collectorParams.rewriteStopped <- struct{}{}
 			return
-		case <-time.After(tc.offCollector.dumpInterval): // no need to instantly write right after reading from files
-			if err := tc.WriteAll(); err != nil {
-				tc.offCollector.logger.Err(err.Error())
-			}
+		case <-time.After(tc.collectorParams.rewriteInterval): // no need to instantly write right after reading from files
+			tc.RewriteAll()
 		}
 	}
 }
 
-// Dumps all of collected cache in files
-func (tc *TransCache) WriteAll() error {
-	if tc.offCollector == nil {
-		return fmt.Errorf("InternalDB dump not activated")
+// DumpAll collected cache in files
+func (tc *TransCache) DumpAll() {
+	if (tc.collectorParams == collectorParams{}) || tc.collectorParams.dumpInterval == 0 {
+		return
 	}
 	var wg sync.WaitGroup
-	errChan := make(chan error, 1) // used to stop and return the function if there are errors
-	done := make(chan struct{}, 1) // used to signal when all writing is finished
-	var chInstanceList []string    // will hold coply cache Instance list to avoid concurrency
-	tc.offCollector.allCollMux.RLock()
-	for chI := range tc.offCollector.setColl {
-		tc.offCollector.setCollMux[chI].RLock()
-		if len(tc.offCollector.setColl[chI]) != 0 {
-			chInstanceList = append(chInstanceList, chI)
-		}
-		tc.offCollector.setCollMux[chI].RUnlock()
-	}
-	tc.offCollector.allCollMux.RUnlock()
-	tc.offCollector.remCollMux.RLock()
-	for chI := range tc.offCollector.remColl {
-		if !slices.Contains(chInstanceList, chI) {
-			if len(tc.offCollector.remColl[chI]) != 0 {
-				chInstanceList = append(chInstanceList, chI)
-			}
-		}
-	}
-	tc.offCollector.remCollMux.RUnlock()
-	for _, cachingInstance := range chInstanceList {
+	for _, cache := range tc.cache {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var chacheIDList []string // will hold coply cache IDs list to avoid concurrency
-			tc.offCollector.allCollMux.RLock()
-			tc.cache[cachingInstance].RLock()
-			tc.offCollector.setCollMux[cachingInstance].RLock()
-			defer func() {
-				tc.offCollector.setCollMux[cachingInstance].RUnlock()
-				tc.cache[cachingInstance].RUnlock()
-			}()
-			for chIDLst := range tc.offCollector.setColl[cachingInstance] {
-				chacheIDList = append(chacheIDList, chIDLst)
-			}
-			tc.offCollector.allCollMux.RUnlock()
-			if err := tc.offCollector.writeRemoveEntity(cachingInstance); err != nil {
-				errChan <- err
-				return
-			}
-			for _, cacheID := range chacheIDList {
-				// put cache item in new values so we dont lock cache for entire duration of encoding/writing
-				value := tc.cache[cachingInstance].cache[cacheID].value
-				expiryTime := tc.cache[cachingInstance].cache[cacheID].expiryTime
-				groupIDs := tc.cache[cachingInstance].cache[cacheID].groupIDs
-				if err := tc.offCollector.writeSetEntity(cachingInstance, cacheID, value,
-					expiryTime, groupIDs); err != nil {
-					errChan <- err
-					return
-				}
-				delete(tc.offCollector.setColl[cachingInstance], cacheID)
+			if err := cache.dumpToFile(); err != nil {
+				cache.offCollector.logger.Err(err.Error())
 			}
 		}()
 	}
-	go func() {
-		wg.Wait()
-		done <- struct{}{}
-	}()
-	select {
-	case err := <-errChan:
-		return err
-	case <-done:
-		return nil
-	}
+	wg.Wait()
 }
 
-// Will gather all sets and removes, from dump files and rewrite a new streamlined dump file
-func (tc *TransCache) Rewrite() error {
-	if tc.offCollector == nil {
-		return fmt.Errorf("InternalDB dump not activated")
-	}
-	tc.offCollector.rewrite()
-	return nil
-}
-
-// Depending on dump and rewrite intervals, will write all thats left in cache collector to file and/or rewrite dump files, and close all files after
-func (tc *TransCache) Shutdown() {
-	if tc.offCollector == nil {
+// RewriteAll will gather all sets and removes, from files and rewrite a new streamlined file
+func (tc *TransCache) RewriteAll() {
+	if (tc.collectorParams == collectorParams{}) || tc.collectorParams.dumpInterval == 0 ||
+		tc.collectorParams.rewriteInterval == 0 {
 		return
 	}
-	if tc.offCollector.dumpInterval > 0 {
-		tc.offCollector.stopWriting <- struct{}{}
-		<-tc.offCollector.writeStopped
-		if err := tc.WriteAll(); err != nil {
-			tc.offCollector.logger.Err(err.Error())
+	var wg sync.WaitGroup
+	for _, cache := range tc.cache {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cache.offCollector.rewriteFiles()
+		}()
+	}
+	wg.Wait()
+}
+
+// Shutdown depending on dump and rewrite intervals, will dump all thats left in cache collector to file and/or rewrite files, and close all files
+func (tc *TransCache) Shutdown() {
+	if (tc.collectorParams == collectorParams{}) || tc.collectorParams.dumpInterval == 0 {
+		return
+	}
+	if tc.collectorParams.dumpInterval > 0 { // stop dumping intervals goroutine if enabled
+		tc.collectorParams.stopDump <- struct{}{}
+		<-tc.collectorParams.dumpStopped
+	}
+	if tc.collectorParams.rewriteInterval > 0 { // stop rewriting intervals goroutine if enabled
+		tc.collectorParams.stopRewrite <- struct{}{}
+		<-tc.collectorParams.rewriteStopped
+	}
+	if tc.collectorParams.rewriteInterval == -2 { // rewrite dump files if rewriting on shutdown is enabled (-2)
+		tc.RewriteAll()
+	}
+	for _, cache := range tc.cache { // close opened cache dump files and delete them if empty
+		if err := closeFile(cache.offCollector.file); err != nil {
+			cache.offCollector.logger.Err(err.Error())
 		}
 	}
-	if tc.offCollector.rewriteInterval > 0 {
-		tc.offCollector.stopRewrite <- struct{}{}
-		<-tc.offCollector.rewriteStopped
-		tc.offCollector.rewrite()
+}
+
+// closeFile closes opened file and deletes it if empty
+func closeFile(file *os.File) error {
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("error getting stats for file <%s>: %w", file.Name(), err)
+
 	}
-	if tc.offCollector.rewriteInterval == -2 {
-		tc.offCollector.rewrite()
-	}
-	for _, file := range tc.offCollector.files {
-		if err := closeFile(file); err != nil {
-			tc.offCollector.logger.Err(err.Error())
-			continue
+	file.Close()
+	if info.Size() == 0 { // if file isnt populated, delete it
+		if err := os.Remove(file.Name()); err != nil {
+			return fmt.Errorf("error removing file <%s>: %w", file.Name(), err)
 		}
 	}
+	return nil
 }
