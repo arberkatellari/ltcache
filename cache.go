@@ -48,6 +48,8 @@ type Cache struct {
 	lruRefs map[string]*list.Element // index the list element based on it's key in cache
 	ttlIdx  *list.List
 	ttlRefs map[string]*list.Element // index the list element based on it' key in cache
+
+	offCollector *OfflineCollector // temporarily hold caching instance, until dumped to file
 }
 
 // New initializes a new cache.
@@ -115,7 +117,26 @@ func (c *Cache) Set(itmID string, value interface{}, grpIDs []string) {
 		return
 	}
 	c.Lock()
-	defer c.Unlock()
+	defer func() {
+		if c.offCollector != nil {
+			if c.offCollector.collectSet {
+				c.offCollector.collect(itmID)
+			} else {
+				c.offCollector.collMux.Lock()
+				defer c.offCollector.collMux.Unlock()
+				if err := c.offCollector.writeEntity(OfflineCacheEntity{
+					IsSet:      true,
+					ItemID:     itmID,
+					Value:      c.cache[itmID].value,
+					ExpiryTime: c.cache[itmID].expiryTime,
+					GroupIDs:   c.cache[itmID].groupIDs,
+				}); err != nil {
+					c.offCollector.logger.Err(err.Error())
+				}
+			}
+		}
+		c.Unlock()
+	}()
 	now := time.Now()
 	if ci, ok := c.cache[itmID]; ok {
 		ci.value = value
@@ -313,4 +334,58 @@ func (c *Cache) GetCacheStats() (cs *CacheStats) {
 	cs = &CacheStats{Items: len(c.cache), Groups: len(c.groups)}
 	c.RUnlock()
 	return
+}
+
+// set adds lru/ttl indexes and refs for each cachedItem. Used only for recovering from dump (not thread safe)
+func (c *Cache) set(chID string, cItem *cachedItem) {
+	if c.maxEntries == DisabledCaching {
+		return
+	}
+	if c.maxEntries != UnlimitedCaching {
+		c.lruRefs[chID] = c.lruIdx.PushFront(cItem)
+	}
+	if c.ttl > 0 {
+		c.ttlRefs[chID] = c.ttlIdx.PushFront(cItem)
+	}
+	if c.maxEntries != UnlimitedCaching {
+		var lElm *list.Element
+		if c.lruIdx.Len() > c.maxEntries {
+			lElm = c.lruIdx.Back()
+		}
+		if lElm != nil {
+			c.remove(lElm.Value.(*cachedItem).itemID)
+		}
+	}
+}
+
+// Writes all of collected cache in files. Concurrent safe
+func (c *Cache) writeToFile() error {
+	c.RLock()
+	c.offCollector.collMux.RLock()
+	defer func() {
+		c.offCollector.collMux.RUnlock()
+		c.RUnlock()
+	}()
+	for itemID, collEntity := range c.offCollector.collection {
+		if collEntity.IsSet { // Write SET entity to file
+			if err := c.offCollector.writeEntity(OfflineCacheEntity{
+				IsSet:      true,
+				ItemID:     itemID,
+				Value:      c.cache[itemID].value,
+				ExpiryTime: c.cache[itemID].expiryTime,
+				GroupIDs:   c.cache[itemID].groupIDs,
+			}); err != nil {
+				return err
+			}
+		} else { // write REMOVE entity to file
+			if err := c.offCollector.writeEntity(OfflineCacheEntity{
+				IsSet:  false,
+				ItemID: itemID,
+			}); err != nil {
+				return err
+			}
+		}
+		delete(c.offCollector.collection, itemID)
+	}
+	return nil
 }

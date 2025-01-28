@@ -63,7 +63,7 @@ func TestTransactionSetWithOffCollector(t *testing.T) {
 	tc := NewTransCache(map[string]*CacheConfig{})
 	tc.offCollector = &OfflineCollector{
 		dumpInterval: time.Second,
-		setColl: map[string]map[string]*OfflineCacheEntity{
+		setColl: map[string]map[string]*CollIdentifier{
 			"*default": {},
 		},
 		setCollMux: map[string]*sync.RWMutex{"*default": new(sync.RWMutex)},
@@ -79,7 +79,7 @@ func TestTransactionSetWithOffCollector(t *testing.T) {
 	}
 	expOC := &OfflineCollector{
 		dumpInterval: time.Second,
-		setColl: map[string]map[string]*OfflineCacheEntity{
+		setColl: map[string]map[string]*CollIdentifier{
 			"*default": {
 				"CacheID1": {
 					IsSet:   true,
@@ -112,7 +112,7 @@ func TestTransactionSetWithOffCollectorErr(t *testing.T) {
 	tc.offCollector = &OfflineCollector{
 		dumpInterval: -1,
 		writeLimit:   1,
-		files: map[string]*os.File{
+		file: map[string]*os.File{
 			"*default": f,
 		},
 		setCollMux: map[string]*sync.RWMutex{"*default": new(sync.RWMutex)},
@@ -538,13 +538,13 @@ func TestTranscacheClearWithOfflineCollector(t *testing.T) {
 		},
 		offCollector: &OfflineCollector{
 			folderPath: "/tmp/internal_db",
-			files:      make(map[string]*os.File),
-			writers:    make(map[string]*bufio.Writer),
-			encoders:   make(map[string]*gob.Encoder),
+			file:       make(map[string]*os.File),
+			writer:     make(map[string]*bufio.Writer),
+			encoder:    make(map[string]*gob.Encoder),
 			logger:     &testLogger{log.New(&logBuf, "", 0)},
 			setCollMux: map[string]*sync.RWMutex{"testChID1": new(sync.RWMutex),
 				"testChID2": new(sync.RWMutex)},
-			setColl: map[string]map[string]*OfflineCacheEntity{
+			setColl: map[string]map[string]*CollIdentifier{
 				"testChID1": {
 					"item1": {
 						IsSet:   true,
@@ -599,7 +599,7 @@ func TestTranscacheClearWithOfflineCollector(t *testing.T) {
 		}
 	}
 	expOC := &OfflineCollector{
-		setColl: map[string]map[string]*OfflineCacheEntity{
+		setColl: map[string]map[string]*CollIdentifier{
 			"testChID1": {},
 			"testChID2": {},
 		},
@@ -842,7 +842,7 @@ func TestTranscacheShutdownShutdownNoIntervalErr(t *testing.T) {
 		offCollector: &OfflineCollector{
 			dumpInterval:    -1,
 			rewriteInterval: -1,
-			files: map[string]*os.File{
+			file: map[string]*os.File{
 				"*default": f,
 			},
 			logger: &testLogger{log.New(&logBuf, "", 0)},
@@ -878,7 +878,7 @@ func TestTranscacheShutdownShutdownRewrite(t *testing.T) {
 		offCollector: &OfflineCollector{
 			dumpInterval:    -1,
 			rewriteInterval: -2,
-			files: map[string]*os.File{
+			file: map[string]*os.File{
 				"*default": f,
 			},
 			logger: &testLogger{log.New(&logBuf, "", 0)},
@@ -916,7 +916,7 @@ func TestTranscacheShutdownShutdownIntervalRewrite(t *testing.T) {
 			rewriteInterval: 5 * time.Second,
 			stopRewrite:     make(chan struct{}),
 			rewriteStopped:  make(chan struct{}),
-			files: map[string]*os.File{
+			file: map[string]*os.File{
 				"*default": f,
 			},
 			logger: &testLogger{log.New(&logBuf, "", 0)},
@@ -960,7 +960,7 @@ func TestTranscacheShutdownShutdownIntervalWrite(t *testing.T) {
 			rewriteInterval: -1,
 			stopWriting:     make(chan struct{}),
 			writeStopped:    make(chan struct{}),
-			files: map[string]*os.File{
+			file: map[string]*os.File{
 				"*default": f,
 			},
 			logger: &testLogger{log.New(&logBuf, "", 0)},
@@ -994,12 +994,12 @@ func TestTransCacheReadAllOK(t *testing.T) {
 		}
 	}()
 	tmpOC := &OfflineCollector{
-		files:    map[string]*os.File{"*default": tmpFile},
-		writers:  make(map[string]*bufio.Writer),
-		encoders: make(map[string]*gob.Encoder),
+		file:    map[string]*os.File{"*default": tmpFile},
+		writer:  make(map[string]*bufio.Writer),
+		encoder: make(map[string]*gob.Encoder),
 	}
-	tmpOC.writers["*default"] = bufio.NewWriter(tmpOC.files["*default"])
-	tmpOC.encoders["*default"] = gob.NewEncoder(tmpOC.writers["*default"])
+	tmpOC.writer["*default"] = bufio.NewWriter(tmpOC.file["*default"])
+	tmpOC.encoder["*default"] = gob.NewEncoder(tmpOC.writer["*default"])
 	if err := tmpOC.storeSetEntity("*default", "CacheID", "sampleValue", time.Time{}, []string{"CacheGroup1"}); err != nil {
 		t.Error(err)
 	}
@@ -1013,10 +1013,10 @@ func TestTransCacheReadAllOK(t *testing.T) {
 			dumpInterval: 5 * time.Second,
 			writeStopped: make(chan struct{}),
 			stopWriting:  make(chan struct{}),
-			files:        map[string]*os.File{"*default": tmpFile},
+			file:         map[string]*os.File{"*default": tmpFile},
 			setCollMux:   make(map[string]*sync.RWMutex),
-			writers:      make(map[string]*bufio.Writer),
-			encoders:     make(map[string]*gob.Encoder),
+			writer:       make(map[string]*bufio.Writer),
+			encoder:      make(map[string]*gob.Encoder),
 		},
 	}
 	go func() {
@@ -1053,12 +1053,12 @@ func TestTransCacheReadAllWithDumpInterval(t *testing.T) {
 		}
 	}()
 	tmpOC := &OfflineCollector{
-		files:    map[string]*os.File{"*default": tmpFile},
-		writers:  make(map[string]*bufio.Writer),
-		encoders: make(map[string]*gob.Encoder),
+		file:    map[string]*os.File{"*default": tmpFile},
+		writer:  make(map[string]*bufio.Writer),
+		encoder: make(map[string]*gob.Encoder),
 	}
-	tmpOC.writers["*default"] = bufio.NewWriter(tmpOC.files["*default"])
-	tmpOC.encoders["*default"] = gob.NewEncoder(tmpOC.writers["*default"])
+	tmpOC.writer["*default"] = bufio.NewWriter(tmpOC.file["*default"])
+	tmpOC.encoder["*default"] = gob.NewEncoder(tmpOC.writer["*default"])
 	if err := tmpOC.storeSetEntity("*default", "CacheID", "sampleValue", time.Time{}, []string{"CacheGroup1"}); err != nil {
 		t.Error(err)
 	}
@@ -1072,10 +1072,10 @@ func TestTransCacheReadAllWithDumpInterval(t *testing.T) {
 			dumpInterval: 100 * time.Millisecond,
 			writeStopped: make(chan struct{}),
 			stopWriting:  make(chan struct{}),
-			files:        map[string]*os.File{"*default": tmpFile},
+			file:         map[string]*os.File{"*default": tmpFile},
 			setCollMux:   make(map[string]*sync.RWMutex),
-			writers:      make(map[string]*bufio.Writer),
-			encoders:     make(map[string]*gob.Encoder),
+			writer:       make(map[string]*bufio.Writer),
+			encoder:      make(map[string]*gob.Encoder),
 		},
 	}
 	go func() {
@@ -1112,12 +1112,12 @@ func TestTransCacheReadAllMinus1DumpInterval(t *testing.T) {
 		}
 	}()
 	tmpOC := &OfflineCollector{
-		files:    map[string]*os.File{"*default": tmpFile},
-		writers:  make(map[string]*bufio.Writer),
-		encoders: make(map[string]*gob.Encoder),
+		file:    map[string]*os.File{"*default": tmpFile},
+		writer:  make(map[string]*bufio.Writer),
+		encoder: make(map[string]*gob.Encoder),
 	}
-	tmpOC.writers["*default"] = bufio.NewWriter(tmpOC.files["*default"])
-	tmpOC.encoders["*default"] = gob.NewEncoder(tmpOC.writers["*default"])
+	tmpOC.writer["*default"] = bufio.NewWriter(tmpOC.file["*default"])
+	tmpOC.encoder["*default"] = gob.NewEncoder(tmpOC.writer["*default"])
 	if err := tmpOC.storeSetEntity("*default", "CacheID", "sampleValue", time.Time{}, []string{"CacheGroup1"}); err != nil {
 		t.Error(err)
 	}
@@ -1130,10 +1130,10 @@ func TestTransCacheReadAllMinus1DumpInterval(t *testing.T) {
 			dumpInterval: -1,
 			folderPath:   "/tmp/internal_db/",
 			writeStopped: make(chan struct{}),
-			files:        map[string]*os.File{"*default": tmpFile},
+			file:         map[string]*os.File{"*default": tmpFile},
 			setCollMux:   make(map[string]*sync.RWMutex),
-			writers:      make(map[string]*bufio.Writer),
-			encoders:     make(map[string]*gob.Encoder),
+			writer:       make(map[string]*bufio.Writer),
+			encoder:      make(map[string]*gob.Encoder),
 		},
 	}
 	if err := tc.ReadAll(); err != nil {
@@ -1165,12 +1165,12 @@ func TestTransCacheReadAll0DumpInterval(t *testing.T) {
 		}
 	}()
 	tmpOC := &OfflineCollector{
-		files:    map[string]*os.File{"*default": tmpFile},
-		writers:  make(map[string]*bufio.Writer),
-		encoders: make(map[string]*gob.Encoder),
+		file:    map[string]*os.File{"*default": tmpFile},
+		writer:  make(map[string]*bufio.Writer),
+		encoder: make(map[string]*gob.Encoder),
 	}
-	tmpOC.writers["*default"] = bufio.NewWriter(tmpOC.files["*default"])
-	tmpOC.encoders["*default"] = gob.NewEncoder(tmpOC.writers["*default"])
+	tmpOC.writer["*default"] = bufio.NewWriter(tmpOC.file["*default"])
+	tmpOC.encoder["*default"] = gob.NewEncoder(tmpOC.writer["*default"])
 	if err := tmpOC.storeSetEntity("*default", "CacheID", "sampleValue", time.Time{}, []string{"CacheGroup1"}); err != nil {
 		t.Error(err)
 	}
@@ -1183,10 +1183,10 @@ func TestTransCacheReadAll0DumpInterval(t *testing.T) {
 			dumpInterval: 0,
 			folderPath:   "/tmp/internal_db/",
 			writeStopped: make(chan struct{}),
-			files:        map[string]*os.File{"*default": tmpFile},
+			file:         map[string]*os.File{"*default": tmpFile},
 			setCollMux:   make(map[string]*sync.RWMutex),
-			writers:      make(map[string]*bufio.Writer),
-			encoders:     make(map[string]*gob.Encoder),
+			writer:       make(map[string]*bufio.Writer),
+			encoder:      make(map[string]*gob.Encoder),
 		},
 	}
 	if err := tc.ReadAll(); err != nil {
@@ -1218,12 +1218,12 @@ func TestTransCacheReadAllRewriteMinus1(t *testing.T) {
 		}
 	}()
 	tmpOC := &OfflineCollector{
-		files:    map[string]*os.File{"*default": tmpFile},
-		writers:  make(map[string]*bufio.Writer),
-		encoders: make(map[string]*gob.Encoder),
+		file:    map[string]*os.File{"*default": tmpFile},
+		writer:  make(map[string]*bufio.Writer),
+		encoder: make(map[string]*gob.Encoder),
 	}
-	tmpOC.writers["*default"] = bufio.NewWriter(tmpOC.files["*default"])
-	tmpOC.encoders["*default"] = gob.NewEncoder(tmpOC.writers["*default"])
+	tmpOC.writer["*default"] = bufio.NewWriter(tmpOC.file["*default"])
+	tmpOC.encoder["*default"] = gob.NewEncoder(tmpOC.writer["*default"])
 	if err := tmpOC.storeSetEntity("*default", "CacheID", "sampleValue", time.Time{}, []string{"CacheGroup1"}); err != nil {
 		t.Error(err)
 	}
@@ -1238,10 +1238,10 @@ func TestTransCacheReadAllRewriteMinus1(t *testing.T) {
 			rewriteInterval: -1,
 			writeStopped:    make(chan struct{}),
 			stopWriting:     make(chan struct{}),
-			files:           map[string]*os.File{"*default": tmpFile},
+			file:            map[string]*os.File{"*default": tmpFile},
 			setCollMux:      make(map[string]*sync.RWMutex),
-			writers:         make(map[string]*bufio.Writer),
-			encoders:        make(map[string]*gob.Encoder),
+			writer:          make(map[string]*bufio.Writer),
+			encoder:         make(map[string]*gob.Encoder),
 		},
 	}
 	if err := tc.ReadAll(); err != nil {
@@ -1273,12 +1273,12 @@ func TestTransCacheReadAllWithRewriteInterval(t *testing.T) {
 		}
 	}()
 	tmpOC := &OfflineCollector{
-		files:    map[string]*os.File{"*default": tmpFile},
-		writers:  make(map[string]*bufio.Writer),
-		encoders: make(map[string]*gob.Encoder),
+		file:    map[string]*os.File{"*default": tmpFile},
+		writer:  make(map[string]*bufio.Writer),
+		encoder: make(map[string]*gob.Encoder),
 	}
-	tmpOC.writers["*default"] = bufio.NewWriter(tmpOC.files["*default"])
-	tmpOC.encoders["*default"] = gob.NewEncoder(tmpOC.writers["*default"])
+	tmpOC.writer["*default"] = bufio.NewWriter(tmpOC.file["*default"])
+	tmpOC.encoder["*default"] = gob.NewEncoder(tmpOC.writer["*default"])
 	if err := tmpOC.storeSetEntity("*default", "CacheID", "sampleValue", time.Time{}, []string{"CacheGroup1"}); err != nil {
 		t.Error(err)
 	}
@@ -1294,10 +1294,10 @@ func TestTransCacheReadAllWithRewriteInterval(t *testing.T) {
 			stopWriting:     make(chan struct{}),
 			rewriteStopped:  make(chan struct{}),
 			stopRewrite:     make(chan struct{}),
-			files:           map[string]*os.File{"*default": tmpFile},
+			file:            map[string]*os.File{"*default": tmpFile},
 			setCollMux:      make(map[string]*sync.RWMutex),
-			writers:         make(map[string]*bufio.Writer),
-			encoders:        make(map[string]*gob.Encoder),
+			writer:          make(map[string]*bufio.Writer),
+			encoder:         make(map[string]*gob.Encoder),
 		},
 	}
 	go func() {
@@ -1356,10 +1356,10 @@ func TestTransCacheReadAllErr2(t *testing.T) {
 			dumpInterval: 0,
 			folderPath:   "/tmp/internal_db/",
 			writeStopped: make(chan struct{}),
-			files:        map[string]*os.File{"*default": f},
+			file:         map[string]*os.File{"*default": f},
 			setCollMux:   make(map[string]*sync.RWMutex),
-			writers:      make(map[string]*bufio.Writer),
-			encoders:     make(map[string]*gob.Encoder),
+			writer:       make(map[string]*bufio.Writer),
+			encoder:      make(map[string]*gob.Encoder),
 		},
 	}
 	expErr := "failed to decode OfflineCacheEntity at </tmp/internal_db/*default/file>: unexpected EOF"
@@ -1379,9 +1379,9 @@ func TestTransCacheWriteAllOK(t *testing.T) {
 			"*sessions": NewCache(-1, -1, false, nil),
 		},
 		offCollector: &OfflineCollector{
-			setColl: map[string]map[string]*OfflineCacheEntity{
+			setColl: map[string]map[string]*CollIdentifier{
 				"*default": {
-					"TestCHID1": &OfflineCacheEntity{
+					"TestCHID1": &CollIdentifier{
 						IsSet:   true,
 						CacheID: "CacheID",
 					},
@@ -1392,8 +1392,8 @@ func TestTransCacheWriteAllOK(t *testing.T) {
 			},
 			setCollMux: map[string]*sync.RWMutex{"*default": {}, "*sessions": {}},
 			writeLimit: -1,
-			encoders:   map[string]*gob.Encoder{"*default": gob.NewEncoder(encBuf), "*sessions": gob.NewEncoder(encBuf2)},
-			writers:    map[string]*bufio.Writer{"*default": bufio.NewWriter(writeBuf), "*sessions": bufio.NewWriter(writeBuf2)},
+			encoder:    map[string]*gob.Encoder{"*default": gob.NewEncoder(encBuf), "*sessions": gob.NewEncoder(encBuf2)},
+			writer:     map[string]*bufio.Writer{"*default": bufio.NewWriter(writeBuf), "*sessions": bufio.NewWriter(writeBuf2)},
 		},
 	}
 	tc.cache["*default"].cache["TestCHID1"] = &cachedItem{value: "sampleValue", groupIDs: []string{"CacheGroup1"}}
@@ -1429,9 +1429,9 @@ func TestTransCacheWriteAllErr2(t *testing.T) {
 	tc := &TransCache{
 		cache: map[string]*Cache{"*default": {}},
 		offCollector: &OfflineCollector{
-			setColl: map[string]map[string]*OfflineCacheEntity{
+			setColl: map[string]map[string]*CollIdentifier{
 				"*default": {
-					"CacheID": &OfflineCacheEntity{
+					"CacheID": &CollIdentifier{
 						IsSet:    true,
 						CacheID:  "CacheID",
 						Value:    "sampleValue",
@@ -1458,9 +1458,9 @@ func TestTransCacheWriteAllErr3(t *testing.T) {
 			"*sessions": NewCache(-1, -1, false, nil),
 		},
 		offCollector: &OfflineCollector{
-			setColl: map[string]map[string]*OfflineCacheEntity{
+			setColl: map[string]map[string]*CollIdentifier{
 				"*default": {
-					"CacheID": &OfflineCacheEntity{
+					"CacheID": &CollIdentifier{
 						IsSet:   true,
 						CacheID: "CacheID",
 					},
