@@ -31,7 +31,7 @@ var testCIs = []*cachedItem{
 var lastEvicted string
 
 func TestSetGetRemNoIndexes(t *testing.T) {
-	cache := NewCache(UnlimitedCaching, 0, false,
+	cache := NewCache(UnlimitedCaching, 0, false, false,
 		func(itmID string, v interface{}) { lastEvicted = itmID })
 	for _, ci := range testCIs {
 		cache.Set(ci.itemID, ci.value, ci.groupIDs)
@@ -156,7 +156,7 @@ func TestSetGetRemNoIndexes(t *testing.T) {
 }
 
 func TestGetGroupItems(t *testing.T) {
-	cache := NewCache(UnlimitedCaching, 0, false,
+	cache := NewCache(UnlimitedCaching, 0, false, false,
 		func(itmID string, v interface{}) { lastEvicted = itmID })
 	for _, ci := range testCIs {
 		cache.Set(ci.itemID, ci.value, ci.groupIDs)
@@ -176,7 +176,7 @@ func TestGetGroupItems(t *testing.T) {
 }
 
 func TestSetGetRemLRU(t *testing.T) {
-	cache := NewCache(3, 0, false, nil)
+	cache := NewCache(3, 0, false, false, nil)
 	for _, ci := range testCIs {
 		cache.Set(ci.itemID, ci.value, nil)
 	}
@@ -261,7 +261,7 @@ func TestSetGetRemLRU(t *testing.T) {
 }
 
 func TestSetGetRemTTLDynamic(t *testing.T) {
-	cache := NewCache(UnlimitedCaching, time.Duration(10*time.Millisecond), false, nil)
+	cache := NewCache(UnlimitedCaching, time.Duration(10*time.Millisecond), false, false, nil)
 	for _, ci := range testCIs {
 		cache.Set(ci.itemID, ci.value, nil)
 	}
@@ -308,7 +308,7 @@ func TestSetGetRemTTLDynamic(t *testing.T) {
 }
 
 func TestSetGetRemTTLStatic(t *testing.T) {
-	cache := NewCache(UnlimitedCaching, time.Duration(10*time.Millisecond), true, nil)
+	cache := NewCache(UnlimitedCaching, time.Duration(10*time.Millisecond), true, false, nil)
 	for _, ci := range testCIs {
 		cache.Set(ci.itemID, ci.value, nil)
 	}
@@ -327,7 +327,7 @@ func TestSetGetRemTTLStatic(t *testing.T) {
 
 func TestSetGetRemLRUttl(t *testing.T) {
 	nrItems := 3
-	cache := NewCache(nrItems, time.Duration(10*time.Millisecond), false, nil)
+	cache := NewCache(nrItems, time.Duration(10*time.Millisecond), false, false, nil)
 	for _, ci := range testCIs {
 		cache.Set(ci.itemID, ci.value, nil)
 	}
@@ -385,7 +385,7 @@ func TestSetGetRemLRUttl(t *testing.T) {
 }
 
 func TestCacheDisabled(t *testing.T) {
-	cache := NewCache(DisabledCaching, time.Duration(10*time.Millisecond), false, nil)
+	cache := NewCache(DisabledCaching, time.Duration(10*time.Millisecond), false, false, nil)
 	for _, ci := range testCIs {
 		cache.Set(ci.itemID, ci.value, nil)
 		if _, has := cache.Get(ci.itemID); has {
@@ -452,7 +452,7 @@ func TestCacheGetItemExpiryTime(t *testing.T) {
 
 func TestCacheSetWithOffCollector(t *testing.T) {
 	var logBuf bytes.Buffer
-	c := NewCache(-1, 0, false, func(itmID string, value interface{}) {})
+	c := NewCache(-1, 0, false, false, func(itmID string, value interface{}) {})
 	c.offCollector = &OfflineCollector{
 		collectSetEntity: true,
 		collection: map[string]*CollectionEntity{
@@ -485,7 +485,7 @@ func TestCacheSetWithOffCollector(t *testing.T) {
 
 func TestCacheSetWithOffCollectorErr(t *testing.T) {
 	var logBuf bytes.Buffer
-	c := NewCache(-1, 0, false, func(itmID string, value interface{}) {})
+	c := NewCache(-1, 0, false, false, func(itmID string, value interface{}) {})
 	f, err := os.OpenFile("/tmp/tmpfile", os.O_APPEND|os.O_CREATE|os.O_WRONLY,
 		0644)
 	if err != nil {
@@ -531,7 +531,7 @@ func TestCacheDumpToFile(t *testing.T) {
 	}
 	writer := bufio.NewWriter(file)
 	encoder := gob.NewEncoder(writer)
-	c := NewCache(-1, 0, false, func(itmID string, value interface{}) {})
+	c := NewCache(-1, 0, false, false, func(itmID string, value interface{}) {})
 	c.cache["item1"] = &cachedItem{itemID: "item1", value: "val1", groupIDs: []string{"gr1"}}
 	c.offCollector = &OfflineCollector{
 		file:    file,
@@ -549,7 +549,9 @@ func TestCacheDumpToFile(t *testing.T) {
 			},
 		},
 	}
-	c.dumpToFile()
+	if err := c.DumpToFile(); err != nil {
+		t.Error(err)
+	}
 	file.Close()
 	if !reflect.DeepEqual(map[string]*CollectionEntity{}, c.offCollector.collection) {
 		t.Errorf("Expected <%+v>, \nReceived <%+v>", "", c.offCollector.collection)
@@ -606,7 +608,7 @@ func TestCacheDumpToFile(t *testing.T) {
 }
 
 func TestNewCacheFromFolderErr1(t *testing.T) {
-	_, err := newCacheFromFolder("/tmp/doesntExist", 0, 0, false, nil, 0, 0, nil)
+	_, err := NewCacheFromFolder(&OfflineCollector{fldrPath: "/tmp/doesntExist"}, 0, 0, false, false, nil)
 	expErr := "error walking the path: lstat /tmp/doesntExist: no such file or directory"
 	if err == nil || expErr != err.Error() {
 		t.Errorf("expected error <%+v>, received error <%+v>", expErr, err)
@@ -615,7 +617,7 @@ func TestNewCacheFromFolderErr1(t *testing.T) {
 
 // BenchmarkSetSimpleCache 	10000000	       228 ns/op
 func BenchmarkSetSimpleCache(b *testing.B) {
-	cache := NewCache(UnlimitedCaching, 0, false, nil)
+	cache := NewCache(UnlimitedCaching, 0, false, false, nil)
 	rand.Seed(time.Now().UTC().UnixNano())
 	min, max := 0, len(testCIs)-1 // so we can have random index
 	for n := 0; n < b.N; n++ {
@@ -626,7 +628,7 @@ func BenchmarkSetSimpleCache(b *testing.B) {
 
 // BenchmarkGetSimpleCache 	20000000	        99.7 ns/op
 func BenchmarkGetSimpleCache(b *testing.B) {
-	cache := NewCache(UnlimitedCaching, 0, false, nil)
+	cache := NewCache(UnlimitedCaching, 0, false, false, nil)
 	for _, ci := range testCIs {
 		cache.Set(ci.itemID, ci.value, nil)
 	}
@@ -640,7 +642,7 @@ func BenchmarkGetSimpleCache(b *testing.B) {
 
 // BenchmarkSetLRU         	 5000000	       316 ns/op
 func BenchmarkSetLRU(b *testing.B) {
-	cache := NewCache(3, 0, false, nil)
+	cache := NewCache(3, 0, false, false, nil)
 	rand.Seed(time.Now().UTC().UnixNano())
 	min, max := 0, len(testCIs)-1 // so we can have random index
 	for n := 0; n < b.N; n++ {
@@ -651,7 +653,7 @@ func BenchmarkSetLRU(b *testing.B) {
 
 // BenchmarkGetLRU         	20000000	       114 ns/op
 func BenchmarkGetLRU(b *testing.B) {
-	cache := NewCache(3, 0, false, nil)
+	cache := NewCache(3, 0, false, false, nil)
 	for _, ci := range testCIs {
 		cache.Set(ci.itemID, ci.value, nil)
 	}
@@ -665,7 +667,7 @@ func BenchmarkGetLRU(b *testing.B) {
 
 // BenchmarkSetTTL         	50000000	        30.4 ns/op
 func BenchmarkSetTTL(b *testing.B) {
-	cache := NewCache(0, time.Duration(time.Millisecond), false, nil)
+	cache := NewCache(0, time.Duration(time.Millisecond), false, false, nil)
 	rand.Seed(time.Now().UTC().UnixNano())
 	min, max := 0, len(testCIs)-1 // so we can have random index
 	for n := 0; n < b.N; n++ {
@@ -676,7 +678,7 @@ func BenchmarkSetTTL(b *testing.B) {
 
 // BenchmarkGetTTL         	20000000	        88.4 ns/op
 func BenchmarkGetTTL(b *testing.B) {
-	cache := NewCache(0, time.Duration(5*time.Millisecond), false, nil)
+	cache := NewCache(0, time.Duration(5*time.Millisecond), false, false, nil)
 	for _, ci := range testCIs {
 		cache.Set(ci.itemID, ci.value, nil)
 	}
@@ -690,7 +692,7 @@ func BenchmarkGetTTL(b *testing.B) {
 
 // BenchmarkSetLRUttl      	 5000000	       373 ns/op
 func BenchmarkSetLRUttl(b *testing.B) {
-	cache := NewCache(3, time.Duration(time.Millisecond), false, nil)
+	cache := NewCache(3, time.Duration(time.Millisecond), false, false, nil)
 	rand.Seed(time.Now().UTC().UnixNano())
 	min, max := 0, len(testCIs)-1 // so we can have random index
 	for n := 0; n < b.N; n++ {
@@ -701,7 +703,7 @@ func BenchmarkSetLRUttl(b *testing.B) {
 
 // BenchmarkGetLRUttl      	10000000	       187 ns/op
 func BenchmarkGetLRUttl(b *testing.B) {
-	cache := NewCache(3, time.Duration(5*time.Millisecond), false, nil)
+	cache := NewCache(3, time.Duration(5*time.Millisecond), false, false, nil)
 	for _, ci := range testCIs {
 		cache.Set(ci.itemID, ci.value, nil)
 	}

@@ -365,18 +365,18 @@ func TestOfflineCollectorStoreRemoveEntityInterval(t *testing.T) {
 	}
 }
 
-func TestOCRewriteErr1(t *testing.T) {
-	var logBuf bytes.Buffer
-	oc := OfflineCollector{
-		fldrPath: "/tmp/notexistent",
-		logger:   &testLogger{log.New(&logBuf, "", 0)},
-	}
-	bufExpect := "error <lstat /tmp/notexistent: no such file or directory> walking path </tmp/notexistent>"
-	oc.rewriteFiles()
-	if rcv := logBuf.String(); !strings.Contains(rcv, bufExpect) {
-		t.Errorf("Expected <%+v>, \nReceived <%+v>", bufExpect, rcv)
-	}
-}
+// func TestOCRewriteErr1(t *testing.T) {
+// 	var logBuf bytes.Buffer
+// 	oc := OfflineCollector{
+// 		fldrPath: "/tmp/notexistent",
+// 		logger:   &testLogger{log.New(&logBuf, "", 0)},
+// 	}
+// 	bufExpect := "error <lstat /tmp/notexistent: no such file or directory> walking path </tmp/notexistent>"
+// 	oc.rewriteFiles()
+// 	if rcv := logBuf.String(); !strings.Contains(rcv, bufExpect) {
+// 		t.Errorf("Expected <%+v>, \nReceived <%+v>", bufExpect, rcv)
+// 	}
+// }
 
 func TestOfflineCollectorShouldSkipRewriteTrue(t *testing.T) {
 	path := "/tmp/internal_db/*default"

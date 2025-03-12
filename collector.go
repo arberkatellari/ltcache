@@ -44,6 +44,30 @@ type OfflineCollector struct {
 	encoder          *gob.Encoder                 // holds encoder
 	writeLimit       int                          // maximum size in MiB that can be written in a singular dump file
 	logger           logger
+	dumpInterval     time.Duration // holds duration to wait until next dump
+	stopDump         chan struct{} // Used to stop cache dumping inverval
+	dumpStopped      chan struct{} // signal when writing is finished
+	rewriteInterval  time.Duration // holds duration to wait until next rewrite
+	stopRewrite      chan struct{} // Used to stop inverval rewriting
+	rewriteStopped   chan struct{} // signal when rewriting is finished
+}
+
+// NewOfflineCollector construct a new OfflineCollector
+func NewOfflineCollector(fldrPath string, writeLimit int, collectSetEntity bool,
+	logger logger, dumpInterval, rewriteInterval time.Duration) *OfflineCollector {
+	return &OfflineCollector{
+		collection:       make(map[string]*CollectionEntity),
+		fldrPath:         fldrPath,
+		writeLimit:       writeLimit,
+		collectSetEntity: collectSetEntity,
+		logger:           logger,
+		dumpInterval:     dumpInterval,
+		rewriteInterval:  rewriteInterval,
+		stopDump:         make(chan struct{}),
+		dumpStopped:      make(chan struct{}),
+		stopRewrite:      make(chan struct{}),
+		rewriteStopped:   make(chan struct{}),
+	}
 }
 
 // Used to temporarily collect cache keys of the items to be dumped to file
@@ -251,24 +275,22 @@ func (coll *OfflineCollector) storeRemoveEntity(itemID string, dumpInterval time
 }
 
 // rewriteFiles will gather all sets and removes from dump files and rewrite a new streamlined dump file
-func (coll *OfflineCollector) rewriteFiles() {
+func (coll *OfflineCollector) rewriteFiles() error {
 	coll.rewriteMux.Lock()
 	defer coll.rewriteMux.Unlock()
 	filePaths, oceMap, skip, err := coll.getFilePathsAndOfflineEntities()
 	if skip { // make sure rewriting is needed before continuing
-		return
+		return nil
 	}
 	if err != nil {
-		coll.logger.Err(err.Error())
-		return
+		return err
 	}
 	tmpRewritePath := path.Join(coll.fldrPath, tmpRewriteName)   // temporary path to rewrite file
 	zeroRewritePath := path.Join(coll.fldrPath, rewriteFileName) // path to completed rewrite file, named 0Rewrite so it stays always first in order of reading files
 	oldRewritePath := path.Join(coll.fldrPath, oldRewriteName)   // path to old 0Rewrite file renamed to oldRewrite
 	file, err := os.OpenFile(tmpRewritePath, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		coll.logger.Err("Error opening file <" + tmpRewritePath + ">: " + err.Error())
-		return
+		return err
 	}
 	tmpFilePaths := []string{tmpRewritePath} // list of temporary rewritten files paths
 	defer func() {
@@ -276,8 +298,8 @@ func (coll *OfflineCollector) rewriteFiles() {
 		if err != nil {
 			file.Close()
 			for i := range tmpFilePaths {
-				if err := os.Remove(tmpFilePaths[i]); err != nil {
-					coll.logger.Err("Failed to remove tmp rewritten file <" + tmpFilePaths[i] + ">, error: " + err.Error())
+				if rmvErr := os.Remove(tmpFilePaths[i]); rmvErr != nil {
+					coll.logger.Warning("Failed to remove tmp rewritten file <" + tmpFilePaths[i] + ">, error: " + rmvErr.Error())
 				}
 			}
 		}
@@ -290,16 +312,15 @@ func (coll *OfflineCollector) rewriteFiles() {
 			filePath := tmpRewritePath + strconv.FormatInt(time.Now().UnixMilli(), 10)
 			if newFile, newWriter, newEnc, err := rotateFileIfNeeded(filePath, coll.writeLimit,
 				file); err != nil {
-				coll.logger.Err("Error rewriting: " + err.Error())
-				return
+				return fmt.Errorf("error rewriting <%w>", err)
 			} else if newEnc != nil { // if rotateFileIfNeeded encoder returned nil it means rotating files wasnt needed
 				file, writer, enc = newFile, newWriter, newEnc
 				tmpFilePaths = append(tmpFilePaths, filePath)
 			}
 		}
 		if err := encodeAndDump(*oce, enc, writer); err != nil {
-			coll.logger.Err(fmt.Sprintf("Rewrite failed. OfflineCacheEntity <%#v> \nError <%v>", oce, err))
-			return
+			coll.logger.Warning(fmt.Sprintf("Rewrite failed. OfflineCacheEntity <%#v> \nError <%v>", oce, err))
+			return err
 		}
 	}
 	file.Close()
@@ -307,8 +328,8 @@ func (coll *OfflineCollector) rewriteFiles() {
 	for i := range filePaths {
 		if strings.Contains(filePaths[i], zeroRewritePath) {
 			if err = os.Rename(filePaths[i], oldRewritePath+strconv.Itoa(i)); err != nil {
-				coll.logger.Err("Failed to rename file from <" + zeroRewritePath + "> to <" + oldRewritePath + strconv.Itoa(i) + ">: " + err.Error())
-				return
+				return fmt.Errorf("Failed to rename file from <%s>, to <%s>, error <%w>",
+					zeroRewritePath, oldRewritePath+strconv.Itoa(i), err)
 			}
 			filePaths[i] = oldRewritePath + strconv.Itoa(i)
 		}
@@ -319,15 +340,16 @@ func (coll *OfflineCollector) rewriteFiles() {
 		index := fmt.Sprintf(fmt.Sprintf("%%0%dd", len(strconv.Itoa(len(tmpFilePaths)))), i) // account for a maximum of digit number of iterations so we keep the order of the files
 		zeroRPath := zeroRewritePath + index
 		if err = os.Rename(tmpFilePaths[i], zeroRPath); err != nil {
-			coll.logger.Err("Failed to rename file from <" + tmpFilePaths[i] + "> to <" + zeroRPath + ">: " + err.Error())
-			return
+			return fmt.Errorf("Failed to rename file from <%s> to <%s>, error <%w> ",
+				tmpFilePaths[i], zeroRPath, err)
 		}
 	}
 	for i := range filePaths { // remove redundant files
 		if err := os.Remove(filePaths[i]); err != nil {
-			coll.logger.Err("Failed to remove file <" + filePaths[i] + ">, error: " + err.Error())
+			return fmt.Errorf("Failed to remove file <%s>, error <%w> ", filePaths[i], err)
 		}
 	}
+	return nil
 }
 
 // getFilePathsAndOfflineEntities will look into the cache dump folder and return the paths to each file inside it; and return the streamlined cache dump it read from all the files.
