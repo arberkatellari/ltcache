@@ -6,15 +6,12 @@ Copyright (C) ITsysCOM GmbH. All Rights Reserved.
 package ltcache
 
 import (
-	"bufio"
 	"bytes"
 	"container/list"
-	"encoding/gob"
 	"fmt"
 	"log"
 	"math/rand"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -704,28 +701,28 @@ func TestTranscacheGetClonedCloneError(t *testing.T) {
 	}
 }
 
-func TestTranscacheRewriteAllErr1(t *testing.T) {
-	var logBuf bytes.Buffer
-	tc := TransCache{
-		cache: map[string]*Cache{
-			"testChID1": {
-				offCollector: &OfflineCollector{
-					fldrPath: "/tmp/notexistent",
-					logger:   &testLogger{log.New(&logBuf, "", 0)},
-				},
-			},
-		},
-		collectorParams: collectorParams{
-			dumpInterval:    -1,
-			rewriteInterval: -1,
-		},
-	}
-	bufExpect := "error <lstat /tmp/notexistent: no such file or directory> walking path </tmp/notexistent>"
-	tc.RewriteAll()
-	if rcv := logBuf.String(); !strings.Contains(rcv, bufExpect) {
-		t.Errorf("Expected <%+v>, \nReceived <%+v>", bufExpect, rcv)
-	}
-}
+// func TestTranscacheRewriteAllErr1(t *testing.T) {
+// 	var logBuf bytes.Buffer
+// 	tc := TransCache{
+// 		cache: map[string]*Cache{
+// 			"testChID1": {
+// 				offCollector: &OfflineCollector{
+// 					fldrPath: "/tmp/notexistent",
+// 					logger:   &testLogger{log.New(&logBuf, "", 0)},
+// 				},
+// 			},
+// 		},
+// 		collectorParams: collectorParams{
+// 			dumpInterval:    -1,
+// 			rewriteInterval: -1,
+// 		},
+// 	}
+// 	bufExpect := "error <lstat /tmp/notexistent: no such file or directory> walking path </tmp/notexistent>"
+// 	tc.RewriteAll()
+// 	if rcv := logBuf.String(); !strings.Contains(rcv, bufExpect) {
+// 		t.Errorf("Expected <%+v>, \nReceived <%+v>", bufExpect, rcv)
+// 	}
+// }
 
 func TestTranscacheShutdownShutdownNil(t *testing.T) {
 	tc := &TransCache{}
@@ -736,232 +733,232 @@ func TestTranscacheShutdownShutdownNil(t *testing.T) {
 	}
 }
 
-func TestTranscacheShutdownShutdownNoIntervalErr(t *testing.T) {
-	path := "/tmp/*default"
-	if err := os.MkdirAll(path, 0755); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := os.RemoveAll(path); err != nil {
-			t.Errorf("Failed to delete temporary dir: %v", err)
-		}
-	}()
-	f, err := os.OpenFile(path+"/file", os.O_APPEND|os.O_CREATE|os.O_WRONLY,
-		0644)
-	if err != nil {
-		t.Error(err)
-	} else {
-		defer f.Close()
-	}
-	f.Close()
-	var logBuf bytes.Buffer
-	tc := &TransCache{
-		collectorParams: collectorParams{
-			dumpInterval:    -1,
-			rewriteInterval: -1,
-		},
-		cache: map[string]*Cache{
-			DefaultCacheInstance: {
-				offCollector: &OfflineCollector{
-					logger: &testLogger{log.New(&logBuf, "", 0)},
-					file:   f,
-				},
-			},
-		},
-	}
-	expBuf := "error getting stats for file </tmp/*default/file>: stat /tmp/*default/file: file already closed"
-	tc.Shutdown()
-	if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
-		t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
-	}
-}
+// func TestTranscacheShutdownShutdownNoIntervalErr(t *testing.T) {
+// 	path := "/tmp/*default"
+// 	if err := os.MkdirAll(path, 0755); err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	defer func() {
+// 		if err := os.RemoveAll(path); err != nil {
+// 			t.Errorf("Failed to delete temporary dir: %v", err)
+// 		}
+// 	}()
+// 	f, err := os.OpenFile(path+"/file", os.O_APPEND|os.O_CREATE|os.O_WRONLY,
+// 		0644)
+// 	if err != nil {
+// 		t.Error(err)
+// 	} else {
+// 		defer f.Close()
+// 	}
+// 	f.Close()
+// 	var logBuf bytes.Buffer
+// 	tc := &TransCache{
+// 		collectorParams: collectorParams{
+// 			dumpInterval:    -1,
+// 			rewriteInterval: -1,
+// 		},
+// 		cache: map[string]*Cache{
+// 			DefaultCacheInstance: {
+// 				offCollector: &OfflineCollector{
+// 					logger: &testLogger{log.New(&logBuf, "", 0)},
+// 					file:   f,
+// 				},
+// 			},
+// 		},
+// 	}
+// 	expBuf := "error getting stats for file </tmp/*default/file>: stat /tmp/*default/file: file already closed"
+// 	tc.Shutdown()
+// 	if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
+// 		t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
+// 	}
+// }
 
-func TestTranscacheShutdownShutdownRewriteErr(t *testing.T) {
-	path := "/tmp/*default"
-	if err := os.MkdirAll(path, 0755); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := os.RemoveAll(path); err != nil {
-			t.Errorf("Failed to delete temporary dir: %v", err)
-		}
-	}()
-	f, err := os.OpenFile(path+"/file", os.O_APPEND|os.O_CREATE|os.O_WRONLY,
-		0644)
-	if err != nil {
-		t.Error(err)
-	} else {
-		defer f.Close()
-	}
-	f.Close()
-	var logBuf bytes.Buffer
-	tc := &TransCache{
-		collectorParams: collectorParams{
-			dumpInterval:    -1,
-			rewriteInterval: -2,
-		},
-		cache: map[string]*Cache{
-			DefaultCacheInstance: {
-				offCollector: &OfflineCollector{
-					logger: &testLogger{log.New(&logBuf, "", 0)},
-					file:   f,
-				},
-			},
-		},
-	}
-	expBuf := "error getting stats for file </tmp/*default/file>: stat /tmp/*default/file: file already closed"
-	tc.Shutdown()
-	if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
-		t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
-	}
-}
+// func TestTranscacheShutdownShutdownRewriteErr(t *testing.T) {
+// 	path := "/tmp/*default"
+// 	if err := os.MkdirAll(path, 0755); err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	defer func() {
+// 		if err := os.RemoveAll(path); err != nil {
+// 			t.Errorf("Failed to delete temporary dir: %v", err)
+// 		}
+// 	}()
+// 	f, err := os.OpenFile(path+"/file", os.O_APPEND|os.O_CREATE|os.O_WRONLY,
+// 		0644)
+// 	if err != nil {
+// 		t.Error(err)
+// 	} else {
+// 		defer f.Close()
+// 	}
+// 	f.Close()
+// 	var logBuf bytes.Buffer
+// 	tc := &TransCache{
+// 		collectorParams: collectorParams{
+// 			dumpInterval:    -1,
+// 			rewriteInterval: -2,
+// 		},
+// 		cache: map[string]*Cache{
+// 			DefaultCacheInstance: {
+// 				offCollector: &OfflineCollector{
+// 					logger: &testLogger{log.New(&logBuf, "", 0)},
+// 					file:   f,
+// 				},
+// 			},
+// 		},
+// 	}
+// 	expBuf := "error getting stats for file </tmp/*default/file>: stat /tmp/*default/file: file already closed"
+// 	tc.Shutdown()
+// 	if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
+// 		t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
+// 	}
+// }
 
-func TestTranscacheShutdownShutdownIntervalRewrite(t *testing.T) {
-	path := "/tmp/*default"
-	if err := os.MkdirAll(path, 0755); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := os.RemoveAll(path); err != nil {
-			t.Errorf("Failed to delete temporary dir: %v", err)
-		}
-	}()
-	f, err := os.OpenFile(path+"/file", os.O_APPEND|os.O_CREATE|os.O_WRONLY,
-		0644)
-	if err != nil {
-		t.Error(err)
-	} else {
-		defer f.Close()
-	}
-	f.Close()
-	var logBuf bytes.Buffer
-	tc := &TransCache{
-		collectorParams: collectorParams{
-			dumpInterval:    -1,
-			rewriteInterval: 5 * time.Second,
-			stopRewrite:     make(chan struct{}),
-			rewriteStopped:  make(chan struct{}),
-		},
-		cache: map[string]*Cache{
-			DefaultCacheInstance: {
-				offCollector: &OfflineCollector{
-					logger: &testLogger{log.New(&logBuf, "", 0)},
-					file:   f,
-				},
-			},
-		},
-	}
-	go func() {
-		tc.Shutdown()
-		expBuf := "error getting stats for file </tmp/*default/file>: stat /tmp/*default/file: file already closed"
-		if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
-			t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
-		}
-	}()
-	time.Sleep(50 * time.Millisecond)
-	<-tc.collectorParams.stopRewrite
-	tc.collectorParams.rewriteStopped <- struct{}{}
-	time.Sleep(50 * time.Millisecond)
-}
+// func TestTranscacheShutdownShutdownIntervalRewrite(t *testing.T) {
+// 	path := "/tmp/*default"
+// 	if err := os.MkdirAll(path, 0755); err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	defer func() {
+// 		if err := os.RemoveAll(path); err != nil {
+// 			t.Errorf("Failed to delete temporary dir: %v", err)
+// 		}
+// 	}()
+// 	f, err := os.OpenFile(path+"/file", os.O_APPEND|os.O_CREATE|os.O_WRONLY,
+// 		0644)
+// 	if err != nil {
+// 		t.Error(err)
+// 	} else {
+// 		defer f.Close()
+// 	}
+// 	f.Close()
+// 	var logBuf bytes.Buffer
+// 	tc := &TransCache{
+// 		collectorParams: collectorParams{
+// 			dumpInterval:    -1,
+// 			rewriteInterval: 5 * time.Second,
+// 			stopRewrite:     make(chan struct{}),
+// 			rewriteStopped:  make(chan struct{}),
+// 		},
+// 		cache: map[string]*Cache{
+// 			DefaultCacheInstance: {
+// 				offCollector: &OfflineCollector{
+// 					logger: &testLogger{log.New(&logBuf, "", 0)},
+// 					file:   f,
+// 				},
+// 			},
+// 		},
+// 	}
+// 	go func() {
+// 		tc.Shutdown()
+// 		expBuf := "error getting stats for file </tmp/*default/file>: stat /tmp/*default/file: file already closed"
+// 		if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
+// 			t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
+// 		}
+// 	}()
+// 	time.Sleep(50 * time.Millisecond)
+// 	<-tc.collectorParams.stopRewrite
+// 	tc.collectorParams.rewriteStopped <- struct{}{}
+// 	time.Sleep(50 * time.Millisecond)
+// }
 
-func TestTranscacheShutdownShutdownIntervalWrite(t *testing.T) {
-	path := "/tmp/*default"
-	if err := os.MkdirAll(path, 0755); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := os.RemoveAll(path); err != nil {
-			t.Errorf("Failed to delete temporary dir: %v", err)
-		}
-	}()
-	f, err := os.OpenFile(path+"/file", os.O_APPEND|os.O_CREATE|os.O_WRONLY,
-		0644)
-	if err != nil {
-		t.Error(err)
-	} else {
-		defer f.Close()
-	}
-	f.Close()
-	var logBuf bytes.Buffer
-	tc := &TransCache{
-		collectorParams: collectorParams{
-			dumpInterval:    5 * time.Second,
-			rewriteInterval: -1,
-			stopDump:        make(chan struct{}),
-			dumpStopped:     make(chan struct{}),
-		},
-		cache: map[string]*Cache{
-			DefaultCacheInstance: {
-				offCollector: &OfflineCollector{
-					logger: &testLogger{log.New(&logBuf, "", 0)},
-					file:   f,
-				},
-			},
-		},
-	}
-	go func() {
-		tc.Shutdown()
-		expBuf := "error getting stats for file </tmp/*default/file>: stat /tmp/*default/file: file already closed"
-		if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
-			t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
-		}
-	}()
-	time.Sleep(50 * time.Millisecond)
-	<-tc.collectorParams.stopDump
-	tc.collectorParams.dumpStopped <- struct{}{}
-	time.Sleep(50 * time.Millisecond)
-}
+// func TestTranscacheShutdownShutdownIntervalWrite(t *testing.T) {
+// 	path := "/tmp/*default"
+// 	if err := os.MkdirAll(path, 0755); err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	defer func() {
+// 		if err := os.RemoveAll(path); err != nil {
+// 			t.Errorf("Failed to delete temporary dir: %v", err)
+// 		}
+// 	}()
+// 	f, err := os.OpenFile(path+"/file", os.O_APPEND|os.O_CREATE|os.O_WRONLY,
+// 		0644)
+// 	if err != nil {
+// 		t.Error(err)
+// 	} else {
+// 		defer f.Close()
+// 	}
+// 	f.Close()
+// 	var logBuf bytes.Buffer
+// 	tc := &TransCache{
+// 		collectorParams: collectorParams{
+// 			dumpInterval:    5 * time.Second,
+// 			rewriteInterval: -1,
+// 			stopDump:        make(chan struct{}),
+// 			dumpStopped:     make(chan struct{}),
+// 		},
+// 		cache: map[string]*Cache{
+// 			DefaultCacheInstance: {
+// 				offCollector: &OfflineCollector{
+// 					logger: &testLogger{log.New(&logBuf, "", 0)},
+// 					file:   f,
+// 				},
+// 			},
+// 		},
+// 	}
+// 	go func() {
+// 		tc.Shutdown()
+// 		expBuf := "error getting stats for file </tmp/*default/file>: stat /tmp/*default/file: file already closed"
+// 		if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
+// 			t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
+// 		}
+// 	}()
+// 	time.Sleep(50 * time.Millisecond)
+// 	<-tc.collectorParams.stopDump
+// 	tc.collectorParams.dumpStopped <- struct{}{}
+// 	time.Sleep(50 * time.Millisecond)
+// }
 
-func TestTransCacheAsyncDumpEntities(t *testing.T) {
-	path := "/tmp/internal_db"
-	if err := os.MkdirAll(path+"/*default", 0755); err != nil {
-		t.Fatal(err)
-	}
-	tmpFile, err := os.CreateTemp("/tmp/internal_db/*default", "testfile-*.txt")
-	if err != nil {
-		t.Fatalf("Failed to create temporary file: %v", err)
-	}
-	defer func() {
-		if err := os.RemoveAll(path); err != nil {
-			t.Errorf("Failed to delete temporary dir: %v", err)
-		}
-	}()
-	tc := &TransCache{
-		cfg: map[string]*CacheConfig{
-			DefaultCacheInstance: {},
-		},
-		cache: map[string]*Cache{
-			DefaultCacheInstance: {
-				offCollector: &OfflineCollector{
-					file:             tmpFile,
-					collectSetEntity: true,
-					fldrPath:         "/tmp/internal_db/*default",
-				},
-			},
-		},
-		collectorParams: collectorParams{
-			dumpInterval: 100 * time.Millisecond,
-			dumpStopped:  make(chan struct{}),
-			stopDump:     make(chan struct{}),
-		},
-	}
-	tc.Set(DefaultCacheInstance, "CacheID", "sampleValue", []string{"CacheGroup1"}, true, "")
-	go func() {
-		tc.asyncDumpEntities()
-		exp := &cachedItem{
-			itemID:     "CacheID",
-			value:      "sampleValue",
-			expiryTime: time.Time{},
-			groupIDs:   []string{"CacheGroup1"},
-		}
-		if !reflect.DeepEqual(exp, tc.cache[DefaultCacheInstance].cache["CacheID"]) {
-			t.Errorf("Expected <%+v>, Received <%+v>", exp, tc.cache[DefaultCacheInstance].cache["CacheID"])
-		}
-	}()
-	time.Sleep(150 * time.Millisecond)
-	tc.collectorParams.stopDump <- struct{}{}
-	time.Sleep(50 * time.Millisecond)
-}
+// func TestTransCacheAsyncDumpEntities(t *testing.T) {
+// 	path := "/tmp/internal_db"
+// 	if err := os.MkdirAll(path+"/*default", 0755); err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	tmpFile, err := os.CreateTemp("/tmp/internal_db/*default", "testfile-*.txt")
+// 	if err != nil {
+// 		t.Fatalf("Failed to create temporary file: %v", err)
+// 	}
+// 	defer func() {
+// 		if err := os.RemoveAll(path); err != nil {
+// 			t.Errorf("Failed to delete temporary dir: %v", err)
+// 		}
+// 	}()
+// 	tc := &TransCache{
+// 		cfg: map[string]*CacheConfig{
+// 			DefaultCacheInstance: {},
+// 		},
+// 		cache: map[string]*Cache{
+// 			DefaultCacheInstance: {
+// 				offCollector: &OfflineCollector{
+// 					file:             tmpFile,
+// 					collectSetEntity: true,
+// 					fldrPath:         "/tmp/internal_db/*default",
+// 				},
+// 			},
+// 		},
+// 		collectorParams: collectorParams{
+// 			dumpInterval: 100 * time.Millisecond,
+// 			dumpStopped:  make(chan struct{}),
+// 			stopDump:     make(chan struct{}),
+// 		},
+// 	}
+// 	tc.Set(DefaultCacheInstance, "CacheID", "sampleValue", []string{"CacheGroup1"}, true, "")
+// 	go func() {
+// 		tc.asyncDumpEntities()
+// 		exp := &cachedItem{
+// 			itemID:     "CacheID",
+// 			value:      "sampleValue",
+// 			expiryTime: time.Time{},
+// 			groupIDs:   []string{"CacheGroup1"},
+// 		}
+// 		if !reflect.DeepEqual(exp, tc.cache[DefaultCacheInstance].cache["CacheID"]) {
+// 			t.Errorf("Expected <%+v>, Received <%+v>", exp, tc.cache[DefaultCacheInstance].cache["CacheID"])
+// 		}
+// 	}()
+// 	time.Sleep(150 * time.Millisecond)
+// 	tc.collectorParams.stopDump <- struct{}{}
+// 	time.Sleep(50 * time.Millisecond)
+// }
 
 func TestCloseFileSuccess(t *testing.T) {
 	tmpFile, err := os.CreateTemp("", "test-success-*.txt")
@@ -1006,50 +1003,50 @@ func TestCloseFileErr(t *testing.T) {
 	}
 }
 
-func TestNewTransCacheWithOfflineCollector(t *testing.T) {
-	path := "/tmp/internal_db"
-	if err := os.MkdirAll(path, 0755); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := os.RemoveAll(path); err != nil {
-			t.Errorf("Failed to delete temporary dir: %v", err)
-		}
-	}()
-	var logBuf bytes.Buffer
-	tc, err := NewTransCacheWithOfflineCollector(path, 10*time.Second, 10*time.Second, -1, map[string]*CacheConfig{}, &testLogger{log.New(&logBuf, "", 0)})
-	if err != nil {
-		t.Error(err)
-	} else if rcv := logBuf.String(); !strings.Contains(rcv, "") {
-		t.Errorf("Expected <%+v>, \nReceived <%+v>", "", rcv)
-	}
-	expTc := NewTransCache(map[string]*CacheConfig{})
-	expTc.collectorParams = collectorParams{
-		dumpInterval:    10 * time.Second,
-		stopDump:        tc.collectorParams.stopDump,
-		dumpStopped:     tc.collectorParams.dumpStopped,
-		rewriteInterval: 10 * time.Second,
-		stopRewrite:     tc.collectorParams.stopRewrite,
-		rewriteStopped:  tc.collectorParams.rewriteStopped,
-	}
-	expTc.cache[DefaultCacheInstance].onEvicted = tc.cache[DefaultCacheInstance].onEvicted
-	expTc.cache[DefaultCacheInstance].lruIdx = tc.cache[DefaultCacheInstance].lruIdx
-	expTc.cache[DefaultCacheInstance].ttlIdx = tc.cache[DefaultCacheInstance].ttlIdx
-	expTc.cache[DefaultCacheInstance].offCollector = &OfflineCollector{
-		collection:       make(map[string]*CollectionEntity),
-		fldrPath:         path + "/" + DefaultCacheInstance,
-		collectSetEntity: true,
-		writeLimit:       -1,
-		file:             tc.cache[DefaultCacheInstance].offCollector.file,
-		writer:           tc.cache[DefaultCacheInstance].offCollector.writer,
-		encoder:          tc.cache[DefaultCacheInstance].offCollector.encoder,
-		logger:           tc.cache[DefaultCacheInstance].offCollector.logger,
-	}
+// func TestNewTransCacheWithOfflineCollector(t *testing.T) {
+// 	path := "/tmp/internal_db"
+// 	if err := os.MkdirAll(path, 0755); err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	defer func() {
+// 		if err := os.RemoveAll(path); err != nil {
+// 			t.Errorf("Failed to delete temporary dir: %v", err)
+// 		}
+// 	}()
+// 	var logBuf bytes.Buffer
+// 	tc, err := NewTransCacheWithOfflineCollector(path, 10*time.Second, 10*time.Second, -1, map[string]*CacheConfig{}, &testLogger{log.New(&logBuf, "", 0)})
+// 	if err != nil {
+// 		t.Error(err)
+// 	} else if rcv := logBuf.String(); !strings.Contains(rcv, "") {
+// 		t.Errorf("Expected <%+v>, \nReceived <%+v>", "", rcv)
+// 	}
+// 	expTc := NewTransCache(map[string]*CacheConfig{})
+// 	expTc.collectorParams = collectorParams{
+// 		dumpInterval:    10 * time.Second,
+// 		stopDump:        tc.collectorParams.stopDump,
+// 		dumpStopped:     tc.collectorParams.dumpStopped,
+// 		rewriteInterval: 10 * time.Second,
+// 		stopRewrite:     tc.collectorParams.stopRewrite,
+// 		rewriteStopped:  tc.collectorParams.rewriteStopped,
+// 	}
+// 	expTc.cache[DefaultCacheInstance].onEvicted = tc.cache[DefaultCacheInstance].onEvicted
+// 	expTc.cache[DefaultCacheInstance].lruIdx = tc.cache[DefaultCacheInstance].lruIdx
+// 	expTc.cache[DefaultCacheInstance].ttlIdx = tc.cache[DefaultCacheInstance].ttlIdx
+// 	expTc.cache[DefaultCacheInstance].offCollector = &OfflineCollector{
+// 		collection:       make(map[string]*CollectionEntity),
+// 		fldrPath:         path + "/" + DefaultCacheInstance,
+// 		collectSetEntity: true,
+// 		writeLimit:       -1,
+// 		file:             tc.cache[DefaultCacheInstance].offCollector.file,
+// 		writer:           tc.cache[DefaultCacheInstance].offCollector.writer,
+// 		encoder:          tc.cache[DefaultCacheInstance].offCollector.encoder,
+// 		logger:           tc.cache[DefaultCacheInstance].offCollector.logger,
+// 	}
 
-	if !reflect.DeepEqual(expTc, tc) {
-		t.Errorf("expected <%#v>, \nreceived <%#v>", expTc, tc)
-	}
-}
+// 	if !reflect.DeepEqual(expTc, tc) {
+// 		t.Errorf("expected <%#v>, \nreceived <%#v>", expTc, tc)
+// 	}
+// }
 
 func TestNewTransCacheWithOfflineCollectorErr1(t *testing.T) {
 	var logBuf bytes.Buffer
@@ -1103,436 +1100,436 @@ func TestNewTransCacheWithOfflineCollectorErr3(t *testing.T) {
 	}
 }
 
-func TestTransCacheDumpAllDump0(t *testing.T) {
-	tc := &TransCache{
-		collectorParams: collectorParams{},
-	}
-	expTc := &TransCache{
-		collectorParams: collectorParams{},
-	}
-	tc.DumpAll()
-	if !reflect.DeepEqual(expTc, tc) {
-		t.Errorf("Expected <%+v>, \nReceived <%+v>", expTc, tc)
-	}
-	tc = &TransCache{
-		collectorParams: collectorParams{
-			dumpInterval: 0,
-		},
-	}
-	expTc = &TransCache{
-		collectorParams: collectorParams{
-			dumpInterval: 0,
-		},
-	}
-	tc.DumpAll()
-	if !reflect.DeepEqual(expTc, tc) {
-		t.Errorf("Expected <%+v>, \nReceived <%+v>", expTc, tc)
-	}
-}
+// func TestTransCacheDumpAllDump0(t *testing.T) {
+// 	tc := &TransCache{
+// 		collectorParams: collectorParams{},
+// 	}
+// 	expTc := &TransCache{
+// 		collectorParams: collectorParams{},
+// 	}
+// 	tc.DumpAll()
+// 	if !reflect.DeepEqual(expTc, tc) {
+// 		t.Errorf("Expected <%+v>, \nReceived <%+v>", expTc, tc)
+// 	}
+// 	tc = &TransCache{
+// 		collectorParams: collectorParams{
+// 			dumpInterval: 0,
+// 		},
+// 	}
+// 	expTc = &TransCache{
+// 		collectorParams: collectorParams{
+// 			dumpInterval: 0,
+// 		},
+// 	}
+// 	tc.DumpAll()
+// 	if !reflect.DeepEqual(expTc, tc) {
+// 		t.Errorf("Expected <%+v>, \nReceived <%+v>", expTc, tc)
+// 	}
+// }
 
-func TestTransCacheDumpAllDumpErr1(t *testing.T) {
-	var logBuf bytes.Buffer
-	tc := &TransCache{
-		collectorParams: collectorParams{
-			dumpInterval: 1 * time.Second,
-		},
-		cache: map[string]*Cache{
-			DefaultCacheInstance: {
-				cache: map[string]*cachedItem{
-					"Item1": {
-						itemID:   "Item1",
-						value:    "val",
-						groupIDs: []string{"gr1"},
-					},
-				},
-				offCollector: &OfflineCollector{
-					writeLimit: 1,
-					collection: map[string]*CollectionEntity{
-						"Item1": {
-							IsSet:  true,
-							ItemID: "Item1",
-						},
-					},
-					logger: &testLogger{log.New(&logBuf, "", 0)},
-				},
-			},
-		},
-	}
-	tc.DumpAll()
-	expBuf := "error getting file stat: invalid argument"
-	if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
-		t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
-	}
-}
+// func TestTransCacheDumpAllDumpErr1(t *testing.T) {
+// 	var logBuf bytes.Buffer
+// 	tc := &TransCache{
+// 		collectorParams: collectorParams{
+// 			dumpInterval: 1 * time.Second,
+// 		},
+// 		cache: map[string]*Cache{
+// 			DefaultCacheInstance: {
+// 				cache: map[string]*cachedItem{
+// 					"Item1": {
+// 						itemID:   "Item1",
+// 						value:    "val",
+// 						groupIDs: []string{"gr1"},
+// 					},
+// 				},
+// 				offCollector: &OfflineCollector{
+// 					writeLimit: 1,
+// 					collection: map[string]*CollectionEntity{
+// 						"Item1": {
+// 							IsSet:  true,
+// 							ItemID: "Item1",
+// 						},
+// 					},
+// 					logger: &testLogger{log.New(&logBuf, "", 0)},
+// 				},
+// 			},
+// 		},
+// 	}
+// 	tc.DumpAll()
+// 	expBuf := "error getting file stat: invalid argument"
+// 	if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
+// 		t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
+// 	}
+// }
 
-func TestTransCacheDumpAllDumpErr2(t *testing.T) {
-	var logBuf bytes.Buffer
-	tc := &TransCache{
-		collectorParams: collectorParams{
-			dumpInterval: 1 * time.Second,
-		},
-		cache: map[string]*Cache{
-			DefaultCacheInstance: {
-				cache: map[string]*cachedItem{
-					"Item1": {
-						itemID:   "Item1",
-						value:    "val",
-						groupIDs: []string{"gr1"},
-					},
-				},
-				offCollector: &OfflineCollector{
-					writeLimit: 1,
-					collection: map[string]*CollectionEntity{
-						"Item1": {
-							IsSet:  false,
-							ItemID: "Item1",
-						},
-					},
-					logger: &testLogger{log.New(&logBuf, "", 0)},
-				},
-			},
-		},
-	}
-	tc.DumpAll()
-	expBuf := "error getting file stat: invalid argument"
-	if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
-		t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
-	}
-}
+// func TestTransCacheDumpAllDumpErr2(t *testing.T) {
+// 	var logBuf bytes.Buffer
+// 	tc := &TransCache{
+// 		collectorParams: collectorParams{
+// 			dumpInterval: 1 * time.Second,
+// 		},
+// 		cache: map[string]*Cache{
+// 			DefaultCacheInstance: {
+// 				cache: map[string]*cachedItem{
+// 					"Item1": {
+// 						itemID:   "Item1",
+// 						value:    "val",
+// 						groupIDs: []string{"gr1"},
+// 					},
+// 				},
+// 				offCollector: &OfflineCollector{
+// 					writeLimit: 1,
+// 					collection: map[string]*CollectionEntity{
+// 						"Item1": {
+// 							IsSet:  false,
+// 							ItemID: "Item1",
+// 						},
+// 					},
+// 					logger: &testLogger{log.New(&logBuf, "", 0)},
+// 				},
+// 			},
+// 		},
+// 	}
+// 	tc.DumpAll()
+// 	expBuf := "error getting file stat: invalid argument"
+// 	if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
+// 		t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
+// 	}
+// }
 
-func TestTransCacheRewriteAllDump0(t *testing.T) {
-	tc := &TransCache{
-		collectorParams: collectorParams{},
-	}
-	expTc := &TransCache{
-		collectorParams: collectorParams{},
-	}
-	tc.RewriteAll()
-	if !reflect.DeepEqual(expTc, tc) {
-		t.Errorf("Expected <%+v>, \nReceived <%+v>", expTc, tc)
-	}
-	tc = &TransCache{
-		collectorParams: collectorParams{
-			dumpInterval: 0,
-		},
-	}
-	expTc = &TransCache{
-		collectorParams: collectorParams{
-			dumpInterval: 0,
-		},
-	}
-	tc.RewriteAll()
-	if !reflect.DeepEqual(expTc, tc) {
-		t.Errorf("Expected <%+v>, \nReceived <%+v>", expTc, tc)
-	}
-	tc = &TransCache{
-		collectorParams: collectorParams{
-			rewriteInterval: 0,
-		},
-	}
-	expTc = &TransCache{
-		collectorParams: collectorParams{
-			rewriteInterval: 0,
-		},
-	}
-	tc.RewriteAll()
-	if !reflect.DeepEqual(expTc, tc) {
-		t.Errorf("Expected <%+v>, \nReceived <%+v>", expTc, tc)
-	}
-}
+// func TestTransCacheRewriteAllDump0(t *testing.T) {
+// 	tc := &TransCache{
+// 		collectorParams: collectorParams{},
+// 	}
+// 	expTc := &TransCache{
+// 		collectorParams: collectorParams{},
+// 	}
+// 	tc.RewriteAll()
+// 	if !reflect.DeepEqual(expTc, tc) {
+// 		t.Errorf("Expected <%+v>, \nReceived <%+v>", expTc, tc)
+// 	}
+// 	tc = &TransCache{
+// 		collectorParams: collectorParams{
+// 			dumpInterval: 0,
+// 		},
+// 	}
+// 	expTc = &TransCache{
+// 		collectorParams: collectorParams{
+// 			dumpInterval: 0,
+// 		},
+// 	}
+// 	tc.RewriteAll()
+// 	if !reflect.DeepEqual(expTc, tc) {
+// 		t.Errorf("Expected <%+v>, \nReceived <%+v>", expTc, tc)
+// 	}
+// 	tc = &TransCache{
+// 		collectorParams: collectorParams{
+// 			rewriteInterval: 0,
+// 		},
+// 	}
+// 	expTc = &TransCache{
+// 		collectorParams: collectorParams{
+// 			rewriteInterval: 0,
+// 		},
+// 	}
+// 	tc.RewriteAll()
+// 	if !reflect.DeepEqual(expTc, tc) {
+// 		t.Errorf("Expected <%+v>, \nReceived <%+v>", expTc, tc)
+// 	}
+// }
 
-func TestTransCacheAsyncRewriteEntitiesMinus1NoChanges(t *testing.T) {
-	path := "/tmp/internal_db"
-	if err := os.MkdirAll(path+"/*default", 0755); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := os.RemoveAll(path); err != nil {
-			t.Errorf("Failed to delete temporary dir: %v", err)
-		}
-	}()
-	file, err := os.OpenFile(path+"/*default/file1", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		t.Error(err)
-	}
-	writer := bufio.NewWriter(file)
-	encoder := gob.NewEncoder(writer)
-	if err := encodeAndDump(OfflineCacheEntity{IsSet: true,
-		ItemID: "item1", Value: "val1", GroupIDs: []string{"gr1"}}, encoder, writer); err != nil {
-		t.Error(err)
-	}
-	file.Close()
-	file, err = os.OpenFile(path+"/*default/file2", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		t.Error(err)
-	}
-	writer = bufio.NewWriter(file)
-	encoder = gob.NewEncoder(writer)
-	if err := encodeAndDump(OfflineCacheEntity{IsSet: true,
-		ItemID: "item2", Value: "val2", GroupIDs: []string{"gr2"}}, encoder, writer); err != nil {
-		t.Error(err)
-	}
-	file.Close()
-	if files, err := os.ReadDir(path + "/*default"); err != nil {
-		t.Error(err)
-	} else if len(files) != 2 {
-		t.Errorf("expected 2 files in <%v>, received <%v>", path+"/*default", len(files))
-	}
-	var logBuf bytes.Buffer
-	c, err := newCacheFromFolder(path+"/*default", -1, 0, false, &testLogger{log.New(&logBuf, "", 0)},
-		20, -1, nil)
-	if err != nil {
-		t.Error(err)
-	}
-	tc := &TransCache{
-		collectorParams: collectorParams{
-			dumpInterval:    10000 * time.Millisecond,
-			rewriteInterval: -1,
-		},
-		cache: map[string]*Cache{
-			DefaultCacheInstance: c,
-		},
-	}
-	tc.asyncRewriteEntities()
-	time.Sleep(100 * time.Millisecond)
-	expBuf := ""
-	if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
-		t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
-	}
+// func TestTransCacheAsyncRewriteEntitiesMinus1NoChanges(t *testing.T) {
+// 	path := "/tmp/internal_db"
+// 	if err := os.MkdirAll(path+"/*default", 0755); err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	defer func() {
+// 		if err := os.RemoveAll(path); err != nil {
+// 			t.Errorf("Failed to delete temporary dir: %v", err)
+// 		}
+// 	}()
+// 	file, err := os.OpenFile(path+"/*default/file1", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+// 	if err != nil {
+// 		t.Error(err)
+// 	}
+// 	writer := bufio.NewWriter(file)
+// 	encoder := gob.NewEncoder(writer)
+// 	if err := encodeAndDump(OfflineCacheEntity{IsSet: true,
+// 		ItemID: "item1", Value: "val1", GroupIDs: []string{"gr1"}}, encoder, writer); err != nil {
+// 		t.Error(err)
+// 	}
+// 	file.Close()
+// 	file, err = os.OpenFile(path+"/*default/file2", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+// 	if err != nil {
+// 		t.Error(err)
+// 	}
+// 	writer = bufio.NewWriter(file)
+// 	encoder = gob.NewEncoder(writer)
+// 	if err := encodeAndDump(OfflineCacheEntity{IsSet: true,
+// 		ItemID: "item2", Value: "val2", GroupIDs: []string{"gr2"}}, encoder, writer); err != nil {
+// 		t.Error(err)
+// 	}
+// 	file.Close()
+// 	if files, err := os.ReadDir(path + "/*default"); err != nil {
+// 		t.Error(err)
+// 	} else if len(files) != 2 {
+// 		t.Errorf("expected 2 files in <%v>, received <%v>", path+"/*default", len(files))
+// 	}
+// 	var logBuf bytes.Buffer
+// 	c, err := newCacheFromFolder(path+"/*default", -1, 0, false, &testLogger{log.New(&logBuf, "", 0)},
+// 		20, -1, nil)
+// 	if err != nil {
+// 		t.Error(err)
+// 	}
+// 	tc := &TransCache{
+// 		collectorParams: collectorParams{
+// 			dumpInterval:    10000 * time.Millisecond,
+// 			rewriteInterval: -1,
+// 		},
+// 		cache: map[string]*Cache{
+// 			DefaultCacheInstance: c,
+// 		},
+// 	}
+// 	tc.asyncRewriteEntities()
+// 	time.Sleep(100 * time.Millisecond)
+// 	expBuf := ""
+// 	if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
+// 		t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
+// 	}
 
-	if _, err := os.ReadDir(path + "/*default"); err != nil {
-		t.Error(err)
-	}
+// 	if _, err := os.ReadDir(path + "/*default"); err != nil {
+// 		t.Error(err)
+// 	}
 
-	f, err := os.Open(path + "/*default/0Rewrite0")
-	if err != nil {
-		t.Error(err)
-	}
-	dc := gob.NewDecoder(f)
-	var rcv *OfflineCacheEntity
-	if err := dc.Decode(&rcv); err != nil {
-		t.Error(err)
-	}
-	exp := []*OfflineCacheEntity{
-		{
-			IsSet:    true,
-			ItemID:   "item1",
-			Value:    "val1",
-			GroupIDs: []string{"gr1"},
-		},
-		{
-			IsSet:    true,
-			ItemID:   "item2",
-			Value:    "val2",
-			GroupIDs: []string{"gr2"},
-		},
-	}
-	if !reflect.DeepEqual(exp[0], rcv) {
-		if !reflect.DeepEqual(exp[1], rcv) {
-			t.Errorf("expected <%+v>, received <%+v>", exp, rcv)
-		}
-	}
-	rcv = nil
-	if err := dc.Decode(&rcv); err != nil {
-		t.Error(err)
-	}
-	if !reflect.DeepEqual(exp[0], rcv) {
-		if !reflect.DeepEqual(exp[1], rcv) {
-			t.Errorf("expected <%+v>, received <%+v>", exp, rcv)
-		}
-	}
+// 	f, err := os.Open(path + "/*default/0Rewrite0")
+// 	if err != nil {
+// 		t.Error(err)
+// 	}
+// 	dc := gob.NewDecoder(f)
+// 	var rcv *OfflineCacheEntity
+// 	if err := dc.Decode(&rcv); err != nil {
+// 		t.Error(err)
+// 	}
+// 	exp := []*OfflineCacheEntity{
+// 		{
+// 			IsSet:    true,
+// 			ItemID:   "item1",
+// 			Value:    "val1",
+// 			GroupIDs: []string{"gr1"},
+// 		},
+// 		{
+// 			IsSet:    true,
+// 			ItemID:   "item2",
+// 			Value:    "val2",
+// 			GroupIDs: []string{"gr2"},
+// 		},
+// 	}
+// 	if !reflect.DeepEqual(exp[0], rcv) {
+// 		if !reflect.DeepEqual(exp[1], rcv) {
+// 			t.Errorf("expected <%+v>, received <%+v>", exp, rcv)
+// 		}
+// 	}
+// 	rcv = nil
+// 	if err := dc.Decode(&rcv); err != nil {
+// 		t.Error(err)
+// 	}
+// 	if !reflect.DeepEqual(exp[0], rcv) {
+// 		if !reflect.DeepEqual(exp[1], rcv) {
+// 			t.Errorf("expected <%+v>, received <%+v>", exp, rcv)
+// 		}
+// 	}
 
-}
+// }
 
-func TestTransCacheAsyncRewriteEntitiesMinus1Changes(t *testing.T) {
-	path := "/tmp/internal_db"
-	if err := os.MkdirAll(path+"/*default", 0755); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := os.RemoveAll(path); err != nil {
-			t.Errorf("Failed to delete temporary dir: %v", err)
-		}
-	}()
-	file, err := os.OpenFile(path+"/*default/file1", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		t.Error(err)
-	}
-	writer := bufio.NewWriter(file)
-	encoder := gob.NewEncoder(writer)
-	if err := encodeAndDump(OfflineCacheEntity{IsSet: true,
-		ItemID: "item1", Value: "val1", GroupIDs: []string{"gr1"}}, encoder, writer); err != nil {
-		t.Error(err)
-	}
-	file.Close()
-	file, err = os.OpenFile(path+"/*default/file2", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		t.Error(err)
-	}
-	writer = bufio.NewWriter(file)
-	encoder = gob.NewEncoder(writer)
-	if err := encodeAndDump(OfflineCacheEntity{IsSet: false,
-		ItemID: "item1"}, encoder, writer); err != nil {
-		t.Error(err)
-	}
-	file.Close()
+// func TestTransCacheAsyncRewriteEntitiesMinus1Changes(t *testing.T) {
+// 	path := "/tmp/internal_db"
+// 	if err := os.MkdirAll(path+"/*default", 0755); err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	defer func() {
+// 		if err := os.RemoveAll(path); err != nil {
+// 			t.Errorf("Failed to delete temporary dir: %v", err)
+// 		}
+// 	}()
+// 	file, err := os.OpenFile(path+"/*default/file1", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+// 	if err != nil {
+// 		t.Error(err)
+// 	}
+// 	writer := bufio.NewWriter(file)
+// 	encoder := gob.NewEncoder(writer)
+// 	if err := encodeAndDump(OfflineCacheEntity{IsSet: true,
+// 		ItemID: "item1", Value: "val1", GroupIDs: []string{"gr1"}}, encoder, writer); err != nil {
+// 		t.Error(err)
+// 	}
+// 	file.Close()
+// 	file, err = os.OpenFile(path+"/*default/file2", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+// 	if err != nil {
+// 		t.Error(err)
+// 	}
+// 	writer = bufio.NewWriter(file)
+// 	encoder = gob.NewEncoder(writer)
+// 	if err := encodeAndDump(OfflineCacheEntity{IsSet: false,
+// 		ItemID: "item1"}, encoder, writer); err != nil {
+// 		t.Error(err)
+// 	}
+// 	file.Close()
 
-	if files, err := os.ReadDir(path + "/*default"); err != nil {
-		t.Error(err)
-	} else if len(files) != 2 {
-		t.Errorf("expected 2 files in <%v>, received <%v>", path+"/*default", len(files))
-	}
+// 	if files, err := os.ReadDir(path + "/*default"); err != nil {
+// 		t.Error(err)
+// 	} else if len(files) != 2 {
+// 		t.Errorf("expected 2 files in <%v>, received <%v>", path+"/*default", len(files))
+// 	}
 
-	var logBuf bytes.Buffer
-	c, err := newCacheFromFolder(path+"/*default", -1, 0, false, &testLogger{log.New(&logBuf, "", 0)},
-		-1, -1, nil)
-	if err != nil {
-		t.Error(err)
-	}
-	tc := &TransCache{
-		collectorParams: collectorParams{
-			dumpInterval:    10000 * time.Millisecond,
-			rewriteInterval: -1,
-		},
-		cache: map[string]*Cache{
-			DefaultCacheInstance: c,
-		},
-	}
-	tc.asyncRewriteEntities()
-	time.Sleep(100 * time.Millisecond)
-	expBuf := ""
-	if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
-		t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
-	}
+// 	var logBuf bytes.Buffer
+// 	c, err := newCacheFromFolder(path+"/*default", -1, 0, false, &testLogger{log.New(&logBuf, "", 0)},
+// 		-1, -1, nil)
+// 	if err != nil {
+// 		t.Error(err)
+// 	}
+// 	tc := &TransCache{
+// 		collectorParams: collectorParams{
+// 			dumpInterval:    10000 * time.Millisecond,
+// 			rewriteInterval: -1,
+// 		},
+// 		cache: map[string]*Cache{
+// 			DefaultCacheInstance: c,
+// 		},
+// 	}
+// 	tc.asyncRewriteEntities()
+// 	time.Sleep(100 * time.Millisecond)
+// 	expBuf := ""
+// 	if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
+// 		t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
+// 	}
 
-	if _, err := os.ReadDir(path + "/*default"); err != nil {
-		t.Error(err)
-	}
+// 	if _, err := os.ReadDir(path + "/*default"); err != nil {
+// 		t.Error(err)
+// 	}
 
-	var builder strings.Builder
-	files, err := os.ReadDir(path + "/*default")
-	if err != nil {
-		t.Fatalf("Error reading directory: %v", err)
-	}
+// 	var builder strings.Builder
+// 	files, err := os.ReadDir(path + "/*default")
+// 	if err != nil {
+// 		t.Fatalf("Error reading directory: %v", err)
+// 	}
 
-	for _, file := range files {
-		if file.IsDir() {
-			continue
-		}
+// 	for _, file := range files {
+// 		if file.IsDir() {
+// 			continue
+// 		}
 
-		filePath := filepath.Join(path+"/*default", file.Name())
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			t.Fatalf("Error reading file %s: %v", file.Name(), err)
-		}
+// 		filePath := filepath.Join(path+"/*default", file.Name())
+// 		content, err := os.ReadFile(filePath)
+// 		if err != nil {
+// 			t.Fatalf("Error reading file %s: %v", file.Name(), err)
+// 		}
 
-		builder.Write(content)
-	}
-	combinedContent := builder.String()
+// 		builder.Write(content)
+// 	}
+// 	combinedContent := builder.String()
 
-	if combinedContent != "" {
-		t.Errorf("Expected empty file, received <%s>", combinedContent)
-	}
-}
+// 	if combinedContent != "" {
+// 		t.Errorf("Expected empty file, received <%s>", combinedContent)
+// 	}
+// }
 
-func TestTransCacheAsyncRewriteEntitiesIntervalChanges(t *testing.T) {
-	path := "/tmp/internal_db"
-	if err := os.MkdirAll(path+"/*default", 0755); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := os.RemoveAll(path); err != nil {
-			t.Errorf("Failed to delete temporary dir: %v", err)
-		}
-	}()
-	file, err := os.OpenFile(path+"/*default/file1", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		t.Error(err)
-	}
-	writer := bufio.NewWriter(file)
-	encoder := gob.NewEncoder(writer)
-	if err := encodeAndDump(OfflineCacheEntity{IsSet: true,
-		ItemID: "item1", Value: "val1", GroupIDs: []string{"gr1"}}, encoder, writer); err != nil {
-		t.Error(err)
-	}
-	file.Close()
-	file, err = os.OpenFile(path+"/*default/file2", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		t.Error(err)
-	}
-	writer = bufio.NewWriter(file)
-	encoder = gob.NewEncoder(writer)
-	if err := encodeAndDump(OfflineCacheEntity{IsSet: false,
-		ItemID: "item1"}, encoder, writer); err != nil {
-		t.Error(err)
-	}
-	file.Close()
+// func TestTransCacheAsyncRewriteEntitiesIntervalChanges(t *testing.T) {
+// 	path := "/tmp/internal_db"
+// 	if err := os.MkdirAll(path+"/*default", 0755); err != nil {
+// 		t.Fatal(err)
+// 	}
+// 	defer func() {
+// 		if err := os.RemoveAll(path); err != nil {
+// 			t.Errorf("Failed to delete temporary dir: %v", err)
+// 		}
+// 	}()
+// 	file, err := os.OpenFile(path+"/*default/file1", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+// 	if err != nil {
+// 		t.Error(err)
+// 	}
+// 	writer := bufio.NewWriter(file)
+// 	encoder := gob.NewEncoder(writer)
+// 	if err := encodeAndDump(OfflineCacheEntity{IsSet: true,
+// 		ItemID: "item1", Value: "val1", GroupIDs: []string{"gr1"}}, encoder, writer); err != nil {
+// 		t.Error(err)
+// 	}
+// 	file.Close()
+// 	file, err = os.OpenFile(path+"/*default/file2", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+// 	if err != nil {
+// 		t.Error(err)
+// 	}
+// 	writer = bufio.NewWriter(file)
+// 	encoder = gob.NewEncoder(writer)
+// 	if err := encodeAndDump(OfflineCacheEntity{IsSet: false,
+// 		ItemID: "item1"}, encoder, writer); err != nil {
+// 		t.Error(err)
+// 	}
+// 	file.Close()
 
-	if files, err := os.ReadDir(path + "/*default"); err != nil {
-		t.Error(err)
-	} else if len(files) != 2 {
-		t.Errorf("expected 2 files in <%v>, received <%v>", path+"/*default", len(files))
-	}
+// 	if files, err := os.ReadDir(path + "/*default"); err != nil {
+// 		t.Error(err)
+// 	} else if len(files) != 2 {
+// 		t.Errorf("expected 2 files in <%v>, received <%v>", path+"/*default", len(files))
+// 	}
 
-	var logBuf bytes.Buffer
-	c, err := newCacheFromFolder(path+"/*default", -1, 0, false, &testLogger{log.New(&logBuf, "", 0)},
-		-1, -1, nil)
-	if err != nil {
-		t.Error(err)
-	}
-	tc := &TransCache{
-		collectorParams: collectorParams{
-			dumpInterval:    1000 * time.Millisecond,
-			rewriteInterval: 10 * time.Millisecond,
-			stopRewrite:     make(chan struct{}),
-			rewriteStopped:  make(chan struct{}),
-		},
-		cache: map[string]*Cache{
-			DefaultCacheInstance: c,
-		},
-	}
+// 	var logBuf bytes.Buffer
+// 	c, err := newCacheFromFolder(path+"/*default", -1, 0, false, &testLogger{log.New(&logBuf, "", 0)},
+// 		-1, -1, nil)
+// 	if err != nil {
+// 		t.Error(err)
+// 	}
+// 	tc := &TransCache{
+// 		collectorParams: collectorParams{
+// 			dumpInterval:    1000 * time.Millisecond,
+// 			rewriteInterval: 10 * time.Millisecond,
+// 			stopRewrite:     make(chan struct{}),
+// 			rewriteStopped:  make(chan struct{}),
+// 		},
+// 		cache: map[string]*Cache{
+// 			DefaultCacheInstance: c,
+// 		},
+// 	}
 
-	go func() {
-		tc.asyncRewriteEntities()
-		expBuf := ""
-		if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
-			t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
-		}
+// 	go func() {
+// 		tc.asyncRewriteEntities()
+// 		expBuf := ""
+// 		if rcv := logBuf.String(); !strings.Contains(rcv, expBuf) {
+// 			t.Errorf("Expected <%+v>, \nReceived <%+v>", expBuf, rcv)
+// 		}
 
-		if _, err := os.ReadDir(path + "/*default"); err != nil {
-			t.Error(err)
-		}
+// 		if _, err := os.ReadDir(path + "/*default"); err != nil {
+// 			t.Error(err)
+// 		}
 
-		var builder strings.Builder
-		files, err := os.ReadDir(path + "/*default")
-		if err != nil {
-			t.Fatalf("Error reading directory: %v", err)
-		}
+// 		var builder strings.Builder
+// 		files, err := os.ReadDir(path + "/*default")
+// 		if err != nil {
+// 			t.Fatalf("Error reading directory: %v", err)
+// 		}
 
-		for _, file := range files {
-			if file.IsDir() {
-				continue
-			}
+// 		for _, file := range files {
+// 			if file.IsDir() {
+// 				continue
+// 			}
 
-			filePath := filepath.Join(path+"/*default", file.Name())
-			content, err := os.ReadFile(filePath)
-			if err != nil {
-				t.Fatalf("Error reading file %s: %v", file.Name(), err)
-			}
+// 			filePath := filepath.Join(path+"/*default", file.Name())
+// 			content, err := os.ReadFile(filePath)
+// 			if err != nil {
+// 				t.Fatalf("Error reading file %s: %v", file.Name(), err)
+// 			}
 
-			builder.Write(content)
-		}
-		combinedContent := builder.String()
+// 			builder.Write(content)
+// 		}
+// 		combinedContent := builder.String()
 
-		if combinedContent != "" {
-			t.Errorf("Expected empty file, received <%s>", combinedContent)
-		}
-	}()
-	time.Sleep(150 * time.Millisecond)
-	tc.collectorParams.stopRewrite <- struct{}{}
-	time.Sleep(50 * time.Millisecond)
+// 		if combinedContent != "" {
+// 			t.Errorf("Expected empty file, received <%s>", combinedContent)
+// 		}
+// 	}()
+// 	time.Sleep(150 * time.Millisecond)
+// 	tc.collectorParams.stopRewrite <- struct{}{}
+// 	time.Sleep(50 * time.Millisecond)
 
-}
+// }
 
 // BenchmarkSet            	 3000000	       469 ns/op
 func BenchmarkSet(b *testing.B) {

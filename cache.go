@@ -12,6 +12,7 @@ package ltcache
 import (
 	"container/list"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -50,7 +51,7 @@ type Cache struct {
 	ttlIdx  *list.List
 	ttlRefs map[string]*list.Element // index the list element based on it' key in cache
 
-	offCollector *OfflineCollector // temporarily hold caching instance, until dumped to file
+	offCollector *OfflineCollector // used dump cache to files
 }
 
 // New initializes a new cache.
@@ -339,13 +340,13 @@ func (c *Cache) GetCacheStats() (cs *CacheStats) {
 	return
 }
 
-// newCacheFromFolder construct a new Cache from reading dump files
-func newCacheFromFolder(fldrPath string, maxEntries int, ttl time.Duration, staticTTL bool, l logger, writeLimit int, dumpInterval time.Duration, onEvicted func(itmID string, value any)) (*Cache, error) {
-	filePaths, err := getFilePaths(fldrPath)
+// NewCacheFromFolder construct a new Cache from reading dump files
+func NewCacheFromFolder(offColl *OfflineCollector, maxEntries int, ttl time.Duration, staticTTL bool, onEvicted func(itmID string, value any)) (*Cache, error) {
+	filePaths, err := getFilePaths(offColl.fldrPath)
 	if err != nil {
 		return nil, fmt.Errorf("error walking the path: %w", err)
 	}
-	paths, err := validateFilePaths(filePaths, fldrPath)
+	paths, err := validateFilePaths(filePaths, offColl.fldrPath)
 	if err != nil {
 		return nil, err
 	}
@@ -364,27 +365,84 @@ func newCacheFromFolder(fldrPath string, maxEntries int, ttl time.Duration, stat
 		}
 	}
 	// populate OfflineCollector of cache after setting all items from dump on cache
-	cache.offCollector = &OfflineCollector{
-		collection:       make(map[string]*CollectionEntity),
-		fldrPath:         fldrPath,
-		writeLimit:       writeLimit,
-		collectSetEntity: dumpInterval != -1,
-		logger:           l,
-	}
+	cache.offCollector = offColl
 	// populate onEvicted funtion for storing remove entities after setting all items from dump on cache
 	cache.onEvicted = append(cache.onEvicted, func(itemID string, _ any) { // ran when an item is removed from cache
-		cache.offCollector.storeRemoveEntity(itemID, dumpInterval)
+		cache.offCollector.storeRemoveEntity(itemID, offColl.dumpInterval)
 	})
 	// populate encoders after reading from files is finished to not needlesly try to read from the new files to be created
 	if cache.offCollector.file, cache.offCollector.writer, cache.offCollector.encoder,
 		err = populateEncoder(cache.offCollector.fldrPath); err != nil {
 		return nil, err
 	}
+	if offColl.rewriteInterval != 0 && offColl.rewriteInterval != -2 {
+		go cache.asyncRewriteEntities()
+	}
+	if offColl.dumpInterval > 0 {
+		go cache.asyncDumpEntities()
+	}
 	return cache, nil
 }
 
+// asyncRewriteEntities rewrite dump files of c Cache on every rewriteInterval
+func (c *Cache) asyncRewriteEntities() {
+	if c.offCollector.rewriteInterval == -1 { // if -1 rewrite only once
+		c.RewriteDumpFiles()
+		return
+	}
+	for {
+		select {
+		case <-c.offCollector.stopRewrite: // in case of shutdown before interval, dont wait for it
+			if err := c.RewriteDumpFiles(); err != nil {
+				c.offCollector.logger.Warning(err.Error())
+			}
+			c.offCollector.rewriteStopped <- struct{}{}
+			return
+		case <-time.After(c.offCollector.rewriteInterval): // no need to instantly write right after reading from files
+			if err := c.RewriteDumpFiles(); err != nil {
+				c.offCollector.logger.Warning(err.Error())
+			}
+		}
+	}
+}
+
+// asyncDumpEntities dumps c Cache on every rewriteInterval
+func (c *Cache) asyncDumpEntities() {
+	for {
+		select {
+		case <-c.offCollector.stopDump: // in case of shutdown before interval, dont wait for it
+			if err := c.DumpToFile(); err != nil {
+				c.offCollector.logger.Warning(err.Error())
+			}
+			c.offCollector.dumpStopped <- struct{}{}
+			return
+		case <-time.After(c.offCollector.dumpInterval): // no need to instantly dump right after reading from files
+			if err := c.DumpToFile(); err != nil {
+				c.offCollector.logger.Warning(err.Error())
+			}
+		}
+	}
+}
+
+// RewriteDumpFiles rewrites dump files of specified c Cache
+func (c *Cache) RewriteDumpFiles() error {
+	if c.offCollector == nil {
+		return fmt.Errorf("couldn't rewrite dump files, Cache's offCollector is nil")
+	}
+	if c.offCollector.rewriteInterval == 0 {
+		return fmt.Errorf("rewriteInterval is disabled")
+	}
+	return c.offCollector.rewriteFiles()
+}
+
 // dumpToFile all of collected cache. (is thread safe)
-func (c *Cache) dumpToFile() error {
+func (c *Cache) DumpToFile() error {
+	if c.offCollector == nil {
+		return fmt.Errorf("couldn't dump cache to file, Cache's offCollector is nil")
+	}
+	if c.offCollector.dumpInterval == 0 {
+		return fmt.Errorf("dumpInterval is disabled")
+	}
 	c.RLock()
 	c.offCollector.collMux.RLock()
 	defer func() {
@@ -411,6 +469,49 @@ func (c *Cache) dumpToFile() error {
 			}
 		}
 		delete(c.offCollector.collection, itemID)
+	}
+	return nil
+}
+
+// Shutdown depending on dump and rewrite intervals, will dump all thats left in cache collector to file and/or rewrite files, and close dump file
+func (c *Cache) Shutdown() error {
+	if c.offCollector == nil {
+		return fmt.Errorf("couldn't shutdown succesfuly, Cache's offCollector is nil")
+	}
+	if c.offCollector.dumpInterval == 0 {
+		return fmt.Errorf("dumpInterval is disabled")
+	}
+	if c.offCollector.dumpInterval > 0 { // stop dumping intervals goroutine if enabled
+		c.offCollector.stopDump <- struct{}{}
+		<-c.offCollector.dumpStopped
+	}
+	if c.offCollector.rewriteInterval > 0 { // stop rewriting intervals goroutine if enabled
+		c.offCollector.stopRewrite <- struct{}{}
+		<-c.offCollector.rewriteStopped
+	}
+	if c.offCollector.rewriteInterval == -2 { // rewrite dump files if rewriting on shutdown is enabled (-2)
+		if err := c.RewriteDumpFiles(); err != nil {
+			c.offCollector.logger.Err(err.Error())
+		}
+	}
+	if err := closeFile(c.offCollector.file); err != nil { // close opened cache dump file and delete if empty
+		c.offCollector.logger.Err(err.Error())
+	}
+	return nil
+}
+
+// closeFile closes opened file and deletes it if empty
+func closeFile(file *os.File) error {
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("error getting stats for file <%s>: %w", file.Name(), err)
+
+	}
+	file.Close()
+	if info.Size() == 0 { // if file isnt populated, delete it
+		if err := os.Remove(file.Name()); err != nil {
+			return fmt.Errorf("error removing file <%s>: %w", file.Name(), err)
+		}
 	}
 	return nil
 }
