@@ -225,10 +225,10 @@ type TenantID struct {
 	ID     string
 }
 
-func (tID *TenantID) Clone() (interface{}, error) {
+func (tID *TenantID) CacheClone() any {
 	tClone := new(TenantID)
 	*tClone = *tID
-	return tClone, nil
+	return tClone
 }
 
 func TestGetClone(t *testing.T) {

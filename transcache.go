@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path"
-	"reflect"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -40,9 +42,9 @@ func GenUUID() string {
 		b[10:])
 }
 
-// Cloner is an interface for objects to clone themselves into interface
-type Cloner interface {
-	Clone() (interface{}, error)
+// CacheCloner is an interface for objects to clone themselves into interface
+type CacheCloner interface {
+	CacheClone() any
 }
 
 type transactionItem struct {
@@ -234,29 +236,6 @@ func (tc *TransCache) Clear(chIDs []string) {
 	tc.cacheMux.Unlock()
 }
 
-// GetCloned returns a clone of an Item if Item is clonable
-func (tc *TransCache) GetCloned(chID, itmID string) (cln interface{}, err error) {
-	tc.cacheMux.RLock()
-	origVal, hasIt := tc.cacheInstance(chID).Get(itmID)
-	tc.cacheMux.RUnlock()
-	if !hasIt {
-		return nil, ErrNotFound
-	}
-	if origVal == nil {
-		return
-	}
-	if _, canClone := origVal.(Cloner); !canClone {
-		return nil, ErrNotClonable
-	}
-	retVals := reflect.ValueOf(origVal).MethodByName("Clone").Call(nil) // Call Clone method on the object
-	errIf := retVals[1].Interface()
-	var notNil bool
-	if err, notNil = errIf.(error); notNil {
-		return
-	}
-	return retVals[0].Interface(), nil
-}
-
 // GetItemIDs returns a list of item IDs matching prefix
 func (tc *TransCache) GetItemIDs(chID, prfx string) (itmIDs []string) {
 	tc.cacheMux.RLock()
@@ -407,4 +386,46 @@ func (tc *TransCache) Shutdown() error {
 		}
 	}
 	return nil
+}
+
+// runCommand is used to run cp or zip linux commands
+func runCommand(command string, args []string) error {
+	// Run the command with arguments
+	cmd := exec.Command(command, args...)
+	// Run the command and get the output
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("command <%s> failed with error <%w>\nOutput: %s", command, err, output)
+	}
+	return nil
+}
+
+// BackupDumpFolder will momentarely stop any dumping and rewriting until all dump folder is backed up in folder path backupFolderPath, making zip true will create a zip file in the path instead
+func (tc *TransCache) BackupDumpFolder(backupFolderPath string, zip bool) error {
+	var dmpFldrPath string           // path to the TransCache Dump folder
+	for _, cache := range tc.cache { // lock all dumping or rewriting until function returns
+		if cache.offCollector == nil {
+			return fmt.Errorf("Cache's offCollector is nil")
+		}
+		if cache.offCollector.rewriteInterval != 0 {
+			cache.offCollector.rewriteMux.Lock()
+		}
+		dmpFldrPath = cache.offCollector.fldrPath // get the path to cache dump, parent path will be extracted after
+		cache.offCollector.fileMux.Lock()
+		defer func() {
+			cache.offCollector.fileMux.Unlock()
+			if cache.offCollector.rewriteInterval != 0 {
+				cache.offCollector.rewriteMux.Unlock()
+			}
+		}()
+	}
+	// dmpFldrPath will be the be the parent folder, i.e.: "/tmp/internal_db/datadb" out of "/tmp/internal_db/datadb/*default"
+	dmpFldrPath = filepath.Dir(dmpFldrPath)
+	// Run the 'cp -r' command
+	if zip {
+		return runCommand("zip", []string{"-r", dmpFldrPath, path.Join(backupFolderPath,
+			"Backup_"+strconv.FormatInt(time.Now().UnixMilli(), 10)+".zip")})
+	}
+	return runCommand("cp", []string{"-r", dmpFldrPath, path.Join(backupFolderPath,
+		"Backup_"+strconv.FormatInt(time.Now().UnixMilli(), 10))})
 }

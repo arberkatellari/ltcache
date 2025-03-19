@@ -79,11 +79,6 @@ func NewCache(maxEntries int, ttl time.Duration, staticTTL, clone bool,
 	return
 }
 
-// CacheValCloner is an interface for objects to clone parts of themselves which are affected by concurrency at the time of cache dump
-type CacheValCloner interface {
-	CacheValClone() any
-}
-
 // Get looks up a key's value from the cache
 func (c *Cache) Get(itmID string) (value any, ok bool) {
 	c.Lock()
@@ -93,8 +88,8 @@ func (c *Cache) Get(itmID string) (value any, ok bool) {
 		return
 	}
 	if c.clone { // try cloning to avoid concurrency only if specified
-		if valClnAny, clnable := ci.value.(CacheValCloner); clnable {
-			value, ok = valClnAny.CacheValClone(), true
+		if valClnAny, clnable := ci.value.(CacheCloner); clnable {
+			value, ok = valClnAny.CacheClone(), true
 		} else {
 			value, ok = ci.value, true
 		}
