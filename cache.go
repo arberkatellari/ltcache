@@ -11,6 +11,9 @@ package ltcache
 
 import (
 	"container/list"
+	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -21,9 +24,11 @@ const (
 	DisabledCaching  = 0
 )
 
+var ErrDumpIntervalDisabled = errors.New("dumpInterval is disabled")
+
 type cachedItem struct {
 	itemID     string
-	value      interface{}
+	value      any
 	expiryTime time.Time
 	groupIDs   []string // list of group this item belongs to
 }
@@ -35,7 +40,7 @@ type Cache struct {
 	cache  map[string]*cachedItem
 	groups map[string]map[string]struct{} // map[groupID]map[itemKey]struct{}
 	// onEvicted will execute specific function if defined when an item will be removed
-	onEvicted func(itmID string, value interface{})
+	onEvicted []func(itmID string, value any)
 	// maxEntries represents maximum number of entries allowed by LRU cache mechanism
 	// -1 for unlimited caching, 0 for disabling caching
 	maxEntries int
@@ -48,15 +53,17 @@ type Cache struct {
 	lruRefs map[string]*list.Element // index the list element based on it's key in cache
 	ttlIdx  *list.List
 	ttlRefs map[string]*list.Element // index the list element based on it' key in cache
+
+	clone        bool              // if true, a clone of the value when getting value from cache will be returned
+	offCollector *OfflineCollector // used dump cache to files
 }
 
 // New initializes a new cache.
-func NewCache(maxEntries int, ttl time.Duration, staticTTL bool,
-	onEvicted func(itmID string, value interface{})) (c *Cache) {
+func NewCache(maxEntries int, ttl time.Duration, staticTTL, clone bool,
+	onEvicted func(itmID string, value any)) (c *Cache) {
 	c = &Cache{
 		cache:      make(map[string]*cachedItem),
 		groups:     make(map[string]map[string]struct{}),
-		onEvicted:  onEvicted,
 		maxEntries: maxEntries,
 		ttl:        ttl,
 		staticTTL:  staticTTL,
@@ -64,6 +71,10 @@ func NewCache(maxEntries int, ttl time.Duration, staticTTL bool,
 		lruRefs:    make(map[string]*list.Element),
 		ttlIdx:     list.New(),
 		ttlRefs:    make(map[string]*list.Element),
+		clone:      clone,
+	}
+	if onEvicted != nil {
+		c.onEvicted = append(c.onEvicted, onEvicted)
 	}
 	if c.ttl > 0 {
 		go c.cleanExpired()
@@ -72,14 +83,22 @@ func NewCache(maxEntries int, ttl time.Duration, staticTTL bool,
 }
 
 // Get looks up a key's value from the cache
-func (c *Cache) Get(itmID string) (value interface{}, ok bool) {
+func (c *Cache) Get(itmID string) (value any, ok bool) {
 	c.Lock()
 	defer c.Unlock()
 	ci, has := c.cache[itmID]
 	if !has {
 		return
 	}
-	value, ok = ci.value, true
+	if c.clone { // try cloning to avoid concurrency only if specified
+		if valClnAny, clnable := ci.value.(CacheCloner); clnable {
+			value, ok = valClnAny.CacheClone(), true
+		} else {
+			value, ok = ci.value, true
+		}
+	} else {
+		value, ok = ci.value, true
+	}
 	if c.maxEntries != UnlimitedCaching { // update lru indexes
 		c.lruIdx.MoveToFront(c.lruRefs[itmID])
 	}
@@ -110,12 +129,31 @@ func (c *Cache) HasItem(itmID string) (has bool) {
 }
 
 // Set sets/adds a value to the cache.
-func (c *Cache) Set(itmID string, value interface{}, grpIDs []string) {
+func (c *Cache) Set(itmID string, value any, grpIDs []string) {
 	if c.maxEntries == DisabledCaching {
 		return
 	}
 	c.Lock()
-	defer c.Unlock()
+	defer func() {
+		if c.offCollector != nil {
+			if c.offCollector.collectSetEntity { // if collectSet is true collect the itemID to write in dump later in the interval
+				c.offCollector.collect(itmID)
+			} else { // if not write the item in dump instantly
+				c.offCollector.collMux.Lock()
+				defer c.offCollector.collMux.Unlock()
+				if err := c.offCollector.writeEntity(OfflineCacheEntity{
+					IsSet:      true,
+					ItemID:     itmID,
+					Value:      c.cache[itmID].value,
+					ExpiryTime: c.cache[itmID].expiryTime,
+					GroupIDs:   c.cache[itmID].groupIDs,
+				}); err != nil {
+					c.offCollector.logger.Err(err.Error())
+				}
+			}
+		}
+		c.Unlock()
+	}()
 	now := time.Now()
 	if ci, ok := c.cache[itmID]; ok {
 		ci.value = value
@@ -199,7 +237,7 @@ func (c *Cache) HasGroup(grpID string) (has bool) {
 	return
 }
 
-func (c *Cache) GetGroupItems(grpID string) (itms []interface{}) {
+func (c *Cache) GetGroupItems(grpID string) (itms []any) {
 	for _, itmID := range c.GetGroupItemIDs(grpID) {
 		itm, _ := c.Get(itmID)
 		itms = append(itms, itm)
@@ -231,8 +269,8 @@ func (c *Cache) remove(itmID string) {
 	}
 	c.remItemFromGroups(ci.itemID, ci.groupIDs)
 	delete(c.cache, ci.itemID)
-	if c.onEvicted != nil {
-		c.onEvicted(ci.itemID, ci.value)
+	for _, onEvicted := range c.onEvicted {
+		onEvicted(ci.itemID, ci.value)
 	}
 }
 
@@ -289,9 +327,9 @@ func (c *Cache) Len() int {
 func (c *Cache) Clear() {
 	c.Lock()
 	defer c.Unlock()
-	if c.onEvicted != nil {
+	for _, onEvicted := range c.onEvicted {
 		for _, ci := range c.cache {
-			c.onEvicted(ci.itemID, ci.value)
+			onEvicted(ci.itemID, ci.value)
 		}
 	}
 	c.cache = make(map[string]*cachedItem)
@@ -313,4 +351,171 @@ func (c *Cache) GetCacheStats() (cs *CacheStats) {
 	cs = &CacheStats{Items: len(c.cache), Groups: len(c.groups)}
 	c.RUnlock()
 	return
+}
+
+// NewCacheFromFolder construct a new Cache from reading dump files
+func NewCacheFromFolder(offColl *OfflineCollector, maxEntries int, ttl time.Duration, staticTTL, clone bool, onEvicted func(itmID string, value any)) (*Cache, error) {
+	filePaths, err := getFilePaths(offColl.fldrPath)
+	if err != nil {
+		return nil, fmt.Errorf("error walking the path: %w", err)
+	}
+	paths, err := validateFilePaths(filePaths, offColl.fldrPath)
+	if err != nil {
+		return nil, err
+	}
+	cache := NewCache(maxEntries, ttl, staticTTL, clone, onEvicted)
+
+	handleEntity := func(oce *OfflineCacheEntity) { // set or remove read item from cache
+		if oce.IsSet {
+			cache.Set(oce.ItemID, oce.Value, oce.GroupIDs)
+		} else {
+			cache.Remove(oce.ItemID)
+		}
+	}
+	for _, filepath := range paths { // range over all files inside cache dump and set the items read into cache
+		if err := readAndDecodeFile(filepath, handleEntity); err != nil {
+			return nil, err
+		}
+	}
+	// populate OfflineCollector of cache after setting all items from dump on cache
+	cache.offCollector = offColl
+	// populate onEvicted funtion for storing remove entities after setting all items from dump on cache
+	cache.onEvicted = append(cache.onEvicted, func(itemID string, _ any) { // ran when an item is removed from cache
+		cache.offCollector.storeRemoveEntity(itemID, offColl.dumpInterval)
+	})
+	// populate encoders after reading from files is finished to not needlesly try to read from the new files to be created
+	if cache.offCollector.file, cache.offCollector.writer, cache.offCollector.encoder,
+		err = populateEncoder(cache.offCollector.fldrPath, ""); err != nil {
+		return nil, err
+	}
+	if offColl.rewriteInterval != 0 && offColl.rewriteInterval != -2 {
+		go cache.asyncRewriteEntities()
+	}
+	if offColl.dumpInterval > 0 {
+		go cache.asyncDumpEntities()
+	}
+	return cache, nil
+}
+
+// asyncRewriteEntities rewrite dump files of c Cache on every rewriteInterval
+func (c *Cache) asyncRewriteEntities() {
+	if c.offCollector.rewriteInterval == -1 { // if -1 rewrite only once
+		c.RewriteDumpFiles()
+		return
+	}
+	for {
+		select {
+		case <-c.offCollector.stopRewrite: // in case of shutdown before interval, dont wait for it
+			if err := c.RewriteDumpFiles(); err != nil {
+				c.offCollector.logger.Warning(err.Error())
+			}
+			c.offCollector.rewriteStopped <- struct{}{}
+			return
+		case <-time.After(c.offCollector.rewriteInterval): // no need to instantly write right after reading from files
+			if err := c.RewriteDumpFiles(); err != nil {
+				c.offCollector.logger.Warning(err.Error())
+			}
+		}
+	}
+}
+
+// asyncDumpEntities dumps c Cache on every dumpInterval
+func (c *Cache) asyncDumpEntities() {
+	for {
+		select {
+		case <-c.offCollector.stopDump: // in case of shutdown before interval, dont wait for it
+			if err := c.DumpToFile(); err != nil {
+				c.offCollector.logger.Warning(err.Error())
+			}
+			c.offCollector.dumpStopped <- struct{}{}
+			return
+		case <-time.After(c.offCollector.dumpInterval): // no need to instantly dump right after reading from files
+			if err := c.DumpToFile(); err != nil {
+				c.offCollector.logger.Warning(err.Error())
+			}
+		}
+	}
+}
+
+// RewriteDumpFiles rewrites dump files of specified c Cache
+func (c *Cache) RewriteDumpFiles() error {
+	if c.offCollector == nil {
+		return fmt.Errorf("couldn't rewrite dump files, Cache's offCollector is nil")
+	}
+	return c.offCollector.rewriteFiles()
+}
+
+// DumpToFile dumps to file all of collected cache. (is thread safe)
+func (c *Cache) DumpToFile() error {
+	if c.offCollector == nil {
+		return fmt.Errorf("couldn't dump cache to file, Cache's offCollector is nil")
+	}
+	if c.offCollector.dumpInterval == 0 {
+		return ErrDumpIntervalDisabled
+	}
+	c.RLock()
+	c.offCollector.collMux.Lock()
+	defer func() {
+		c.offCollector.collMux.Unlock()
+		c.RUnlock()
+	}()
+	for itemID, collEntity := range c.offCollector.collection {
+		if collEntity.IsSet { // Write SET entity to dump file
+			if err := c.offCollector.writeEntity(OfflineCacheEntity{
+				IsSet:      true,
+				ItemID:     itemID,
+				Value:      c.cache[itemID].value,
+				ExpiryTime: c.cache[itemID].expiryTime,
+				GroupIDs:   c.cache[itemID].groupIDs,
+			}); err != nil {
+				return err
+			}
+		} else { // write REMOVE entity to dump file
+			if err := c.offCollector.writeEntity(OfflineCacheEntity{
+				IsSet:  false,
+				ItemID: itemID,
+			}); err != nil {
+				return err
+			}
+		}
+		delete(c.offCollector.collection, itemID)
+	}
+	return nil
+}
+
+// Shutdown depending on dump and rewrite intervals, will dump all thats left in cache collector to file and/or rewrite files, and close dump file
+func (c *Cache) Shutdown() error {
+	if c.offCollector == nil {
+		return nil // dont return any errors on caches where collector isnt needed
+	}
+	if c.offCollector.dumpInterval > 0 { // stop dumping intervals goroutine if enabled
+		c.offCollector.stopDump <- struct{}{}
+		<-c.offCollector.dumpStopped
+	}
+	if c.offCollector.rewriteInterval > 0 { // stop rewriting intervals goroutine if enabled
+		c.offCollector.stopRewrite <- struct{}{}
+		<-c.offCollector.rewriteStopped
+	}
+	if c.offCollector.rewriteInterval == -2 { // rewrite dump files if rewriting on shutdown is enabled (-2)
+		if err := c.RewriteDumpFiles(); err != nil {
+			return err
+		}
+	}
+	return closeFile(c.offCollector.file) // close opened cache dump file and delete if empty
+}
+
+// closeFile closes opened file and deletes it if empty
+func closeFile(file *os.File) error {
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("error getting file stats: %w", err)
+
+	}
+	file.Close()
+	if info.Size() == 0 { // if file isnt populated, delete it
+		if err := os.Remove(file.Name()); err != nil {
+			return fmt.Errorf("error removing file <%s>: %w", file.Name(), err)
+		}
+	}
+	return nil
 }
