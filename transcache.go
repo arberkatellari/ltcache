@@ -468,77 +468,83 @@ func (tc *TransCache) backupPath() (string, error) {
 	return "", errors.New("empty BackupPath")
 }
 
-// dumpFolderPath returns the DumpFolder string from TransCache
-func (tc *TransCache) dumpFolderPath() (string, error) {
-	for _, cache := range tc.cache {
-		return cache.offCollector.fldrPath, nil
-	}
-	return "", errors.New("empty DumpFolderPath")
-}
-
-// Restore attempts to restore the TransCache from the latest backup in the specified backupPath.
-// If backupPath is not specified, it will be taken from the cache backup path.
-// or "backup_<unix_ms_timestamp>.zip" for zip files. The backup files will be added on top of what already exists in dump folders,
-// and any overlapping cache entities will be overwritten with the restored entities.
+// Restore attempts to restore the TransCache from the latest backup in the specified
+// backupPath, be that a folder with backups taking the latest backup or a singular backup itself specified in the path. If backupPath is not specified, it will be taken
+// from the cache backup path. Any data that was dumped from internal DB will be cleared
+// before restoring from backup
 func (tc *TransCache) Restore(backupPath string) (err error) {
+	for _, chI := range tc.cache {
+		if chI.offCollector == nil {
+			return fmt.Errorf("couldn't restore cache from backup, offline collector is nil")
+		}
+		break
+	}
 	if backupPath == "" {
 		backupPath, err = tc.backupPath()
 		if err != nil {
 			return err
 		}
 	}
-	// Read all entries in the backup directory
-	entries, err := os.ReadDir(backupPath)
-	if err != nil {
-		return fmt.Errorf("failed to read backup directory: %w", err)
-	}
 
-	// Find all valid backup entries and pick the latest by unix ms timestamp
-	const prefix = "backup_"
-	var latestName string   // holds latest backup folder/zip name
-	var latestTS int64 = -1 // holds latest backup folder/zip unix timestamp
-
-	for _, entry := range entries {
-		name := entry.Name()
-
-		// Must start with "backup_"
-		if !strings.HasPrefix(name, prefix) {
-			continue
-		}
-
-		// Strip prefix, and ".zip" suffix
-		backupUnixTime := strings.TrimPrefix(name, prefix)
-		isZip := strings.HasSuffix(backupUnixTime, ".zip")
-		if isZip {
-			backupUnixTime = strings.TrimSuffix(backupUnixTime, ".zip")
-		} else if !entry.IsDir() {
-			// Not a zip and not a directory — skip
-			continue
-		}
-
-		// rest must be a pure unix integer
-		ts, err := strconv.ParseInt(backupUnixTime, 10, 64)
+	var fullPath string
+	const backupPrefix = "backup_"
+	if strings.HasPrefix(filepath.Base(backupPath), backupPrefix) { // if path is not path to backups for a singular backup, take it as full path
+		fullPath = backupPath
+	} else { // Find all valid backup entries and pick the latest by unix ms timestamp
+		// Read all entries in the backup directory
+		entries, err := os.ReadDir(backupPath)
 		if err != nil {
-			continue
+			return fmt.Errorf("failed to read backup directory: %w", err)
+		}
+		var latestName string   // holds latest backup folder/zip name
+		var latestTS int64 = -1 // holds latest backup folder/zip unix timestamp
+
+		for _, entry := range entries {
+			name := entry.Name()
+
+			// Must start with "backup_"
+			if !strings.HasPrefix(name, backupPrefix) {
+				continue
+			}
+
+			// Strip prefix, and ".zip" suffix
+			backupUnixTime := strings.TrimPrefix(name, backupPrefix)
+			isZip := strings.HasSuffix(backupUnixTime, ".zip")
+			if isZip {
+				backupUnixTime = strings.TrimSuffix(backupUnixTime, ".zip")
+			} else if !entry.IsDir() {
+				// Not a zip and not a directory — skip
+				continue
+			}
+
+			// rest must be a pure unix integer
+			ts, err := strconv.ParseInt(backupUnixTime, 10, 64)
+			if err != nil {
+				continue
+			}
+
+			if ts > latestTS { // keep the hightest unix time
+				latestTS = ts
+				latestName = name
+			}
 		}
 
-		if ts > latestTS {
-			latestTS = ts
-			latestName = name
+		if latestName == "" {
+			return fmt.Errorf("no valid backup found in %s", backupPath)
 		}
-	}
 
-	if latestName == "" {
-		return fmt.Errorf("no valid backup found in %s", backupPath)
-	}
+		if err := tc.clearDumpFiles(); err != nil {
+			return err
+		}
 
-	fullPath := filepath.Join(backupPath, latestName) // full path to the latest backup folder or zip file
-	var wg sync.WaitGroup                             // wait for all goroutines to finish
-	errChan := make(chan error, 1)                    // signal error from goroutines
-	restored := make(chan struct{})                   // signal transCache restored
+		fullPath = filepath.Join(backupPath, latestName) // full path to the latest backup folder or zip file
+	}
+	var wg sync.WaitGroup           // wait for all goroutines to finish
+	errChan := make(chan error, 1)  // signal error from goroutines
+	restored := make(chan struct{}) // signal transCache restored
 
 	// If it's a zip file, open it and read its contents. Otherwise, walk the directory
-	if strings.HasSuffix(latestName, ".zip") {
+	if strings.HasSuffix(fullPath, ".zip") {
 		zr, err := zip.OpenReader(fullPath)
 		if err != nil {
 			return fmt.Errorf("failed to open zip %s: %w", fullPath, err)
@@ -632,6 +638,66 @@ func (tc *TransCache) Restore(backupPath string) (err error) {
 	case err := <-errChan:
 		return err
 	case <-restored:
+		return
+	}
+}
+
+// clearDumpFiles will delete all dump files and create new empty ones for each cache instance
+func (tc *TransCache) clearDumpFiles() (err error) {
+	var wg sync.WaitGroup          // wait for all goroutines to finish
+	errChan := make(chan error, 1) // signal error from goroutines
+	cleared := make(chan struct{}) // signal dump cleared
+	for _, cacheInstance := range tc.cache {
+		cacheInstance.offCollector.collMux.Lock()    // dont clear mid collection dump
+		cacheInstance.offCollector.fileMux.Lock()    // dont clear mid file editing
+		cacheInstance.offCollector.rewriteMux.Lock() // dont clear mid folder rewriting
+		defer func() {
+			cacheInstance.offCollector.collMux.Unlock()
+			cacheInstance.offCollector.fileMux.Unlock()
+			cacheInstance.offCollector.rewriteMux.Unlock()
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cacheInstance.offCollector.collection = make(map[string]*CollectionEntity) // clear collection
+			if err := cacheInstance.offCollector.file.Close(); err != nil {
+				errChan <- err
+				return
+			}
+
+			// remove all files from dump folder
+			entries, err := os.ReadDir(cacheInstance.
+				offCollector.fldrPath)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			for _, entry := range entries {
+				path := filepath.Join(cacheInstance.
+					offCollector.fldrPath, entry.Name())
+				err := os.RemoveAll(path)
+				if err != nil {
+					errChan <- err
+					return
+				}
+			}
+
+			// create new live file
+			if cacheInstance.offCollector.file, cacheInstance.offCollector.writer,
+				cacheInstance.offCollector.encoder, err = populateEncoder(cacheInstance.
+				offCollector.fldrPath, ""); err != nil {
+				errChan <- err
+			}
+		}()
+	}
+	go func() {
+		wg.Wait() // wait for all goroutines to finish
+		close(cleared)
+	}()
+	select {
+	case err := <-errChan:
+		return err
+	case <-cleared:
 		return
 	}
 }
