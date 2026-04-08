@@ -533,11 +533,10 @@ func (tc *TransCache) Restore(backupPath string) (err error) {
 			return fmt.Errorf("no valid backup found in %s", backupPath)
 		}
 
-		if err := tc.clearDumpFiles(); err != nil {
-			return err
-		}
-
 		fullPath = filepath.Join(backupPath, latestName) // full path to the latest backup folder or zip file
+	}
+	if err := tc.clearCacheAndDumpFiles(true); err != nil {
+		return err
 	}
 	var wg sync.WaitGroup           // wait for all goroutines to finish
 	errChan := make(chan error, 1)  // signal error from goroutines
@@ -642,12 +641,16 @@ func (tc *TransCache) Restore(backupPath string) (err error) {
 	}
 }
 
-// clearDumpFiles will delete all dump files and create new empty ones for each cache instance
-func (tc *TransCache) clearDumpFiles() (err error) {
+// clearCacheAndDumpFiles will delete all dump files and create new empty ones for each cache instance.
+// If clearCache is true, it will also clear the cache instance
+func (tc *TransCache) clearCacheAndDumpFiles(clearCache bool) (err error) {
 	var wg sync.WaitGroup          // wait for all goroutines to finish
 	errChan := make(chan error, 1) // signal error from goroutines
 	cleared := make(chan struct{}) // signal dump cleared
 	for _, cacheInstance := range tc.cache {
+		if clearCache {
+			cacheInstance.Clear()
+		}
 		cacheInstance.offCollector.collMux.Lock()    // dont clear mid collection dump
 		cacheInstance.offCollector.fileMux.Lock()    // dont clear mid file editing
 		cacheInstance.offCollector.rewriteMux.Lock() // dont clear mid folder rewriting
@@ -698,6 +701,48 @@ func (tc *TransCache) clearDumpFiles() (err error) {
 	case err := <-errChan:
 		return err
 	case <-cleared:
+		return
+	}
+}
+
+// Snapshot will lock all chache instances, backup the live dump folder taking zip as parameter to zip the backup or not, after which it cleares the live dump folder and creates new dump files out of the live cache entities inside TransCache, and finaly unlock all cache instances
+func (tc *TransCache) Snapshot(backupFolderPath string, zip bool) (err error) {
+	if err := tc.BackupDumpFolder(backupFolderPath, zip); err != nil {
+		return err
+	}
+	if err := tc.clearCacheAndDumpFiles(false); err != nil {
+		return err
+	}
+
+	var wg sync.WaitGroup           // wait for all goroutines to finish
+	errChan := make(chan error, 1)  // signal error from goroutines
+	finished := make(chan struct{}) // signal snapshot finished
+	for _, chacheInstance := range tc.cache {
+		go func() {
+			chacheInstance.Lock()
+			defer chacheInstance.Unlock()
+			for _, cache := range chacheInstance.cache {
+				if err = chacheInstance.offCollector.writeEntity(&OfflineCacheEntity{
+					IsSet:      true,
+					ItemID:     cache.itemID,
+					Value:      cache.value,
+					ExpiryTime: cache.expiryTime,
+					GroupIDs:   cache.groupIDs,
+				}); err != nil {
+					errChan <- err
+					return
+				}
+			}
+		}()
+	}
+	go func() {
+		wg.Wait() // wait for all goroutines to finish
+		close(finished)
+	}()
+	select {
+	case err := <-errChan:
+		return err
+	case <-finished:
 		return
 	}
 }
